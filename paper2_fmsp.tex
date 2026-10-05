@@ -1,0 +1,809 @@
+% arXiv submission draft --- Part 2 of 3 (FMSP)
+% Target categories: cs.CL (primary), cs.LG (cross-list)
+% Source of truth: arxiv/paper2_fmsp.md (content identical)
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\emergencystretch=2em
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{verbatim}
+\usepackage{footmisc}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{microtype}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{textcomp}
+\usepackage{pifont}
+\usepackage{fontawesome5}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+% Code block setup: math symbols inside listings are written with $...$ escapes (mathescape)
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  mathescape=true
+}
+
+% Compact caption spacing
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+
+% Title block
+\title{The Objective Is the Lever: FMSP and the Composite-Objective Account of Fine-tuning Sub-1M Language Models}
+\author{Siu Lee\\ \texttt{lukems903@gmail.com}\\ Independent Researcher}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Sub-1M-parameter language models are a fully controllable regime for studying fine-tuning: every recipe choice can be registered, held fixed, and re-measured end to end. In that regime, naive full fine-tuning under the old objective (full-sequence cross-entropy, no conservation term) destroys the model. Writing 9{,}012 QA pairs into roughly two million learnable bits overwrites the language model itself. Under the inherited default recipe, chatter perplexity on the pretraining corpus explodes and most out-of-distribution (OOD) prompts elicit verbatim memorized answers.
+
+The central finding, from a controlled full-fine-tuning baseline, is that the composite objective is the first-order variable, not the freeze-plus-adapter machinery. The composite objective is answer-only cross-entropy plus probe-KL conservation (a KL anchor pulling the fine-tuned model's distribution on held-out probe text toward the frozen backbone's). The residual differential value of FMSP (Fine-tuning with Minimal Parameter changes for Small-parameter LMs) is OOD boundary discipline, tied on the mixer chassis (V87) and robust on the vanilla transformer reference (V88) under collapse-inclusive three-seed rescoring.
+
+P05, the registered FMSP recipe (5\% Fisher-guided per-scalar freezing, answer-only cross-entropy, probe-KL weight 0.5, rank-16 zero-init adapter), memorizes the 988 held-out paraphrases at exact match (EM) 544.3 (three-seed mean) while preserving pretraining-corpus (Discord-Dialogues) perplexity at 3.68. Self-distilled abstention halves fabrication on the n=18 unanswerable battery (small battery; directional --- \S4.6) at no memorization cost. A budget-matched LoRA r=64 (seed 42) recovers about 85\% of FMSP's EM, confirming the trainable budget is binding. A six-budget scaling study (\S5) reveals a memorization cliff between 500K and 300K and a hard EM=0 floor at or below 100K. Backbone-level metrics are n=1; the backbone is a single seed-42 pretrain. Part 1 of this series now reports the discord-1M cell at three backbone (pretrain) seeds, and the discord-1M architecture gap replicates across backbone seeds [Lee, Part 1 of this series, companion paper].
+\end{abstract}
+
+\section{Introduction}
+
+The default fine-tuning recipe at the sub-1M-parameter scale is full fine-tuning. The default recipe at every other scale is something more conservative: low-rank adapters, prefix tuning, partial freezing, knowledge distillation. The reason is that large models have enough redundant capacity that updating everything is wasteful, while small models do not. Under 1M parameters the trade-off flips. With roughly 2M bits of learnable capacity and 9{,}012 training QA pairs to write, every parameter carries information that the pretrained language model already needs. Under this old objective, full fine-tuning rewrites the language model to fit the answer distribution; the answer corpus is memorized, and the conversational distribution is forgotten. (Section 6.5 shows that under the P05 composite objective --- answer-only CE plus probe-KL --- full-FT matches or exceeds FMSP on memorization and language preservation; the destroyer is the objective, not full-FT per se.)
+
+The collapse is measurable. On the project's V76-RPG 1M backbone (993{,}254 parameters; a gated long convolution [Poli et al., 2023] with rotary position embeddings [Su et al., 2024] on both value and gate pathways, pretrained on Discord-Dialogues to validation perplexity 3.18 (pretrain validation split)), the pre-V77 FMSP regime (95\% of parameters trainable) on 9{,}012 QA pairs produces exact-match EM 457 $\pm$ 32 (3-seed mean; best single seed s44: 494) of 988 on held-out paraphrases, but Discord chatter perplexity (chatter is a 9-prompt open-conversation battery) rises to roughly 51, out-of-distribution hijack (an off-distribution or unrelated prompt elicits a verbatim memorized answer) sits at $\sim$77\% (79.7\% on the measured V76-RPG-s44 arm), and the model answers casual conversational prompts with memorized factoids (``i'm feeling kind of tired today'' elicits ``Tell me the capital city of Spain is Madrid''). The model has memorized; the language model has not survived.
+
+Parameter-efficient fine-tuning methods designed for 7B-and-larger models do not address this regime. LoRA's per-layer low-rank update assumes redundant capacity; here, every parameter is load-bearing --- and \S6.5 measures that assumption directly: at standard ranks \{4,16\} under P05-matched hyperparameters (whose trainable budget is 73 to 94\% below FMSP's $\sim$951k), LoRA fails sub-1M memorization (0 to 25.3 EM of 988) on both registered 1M chassis, consistent with the trainable-budget trend of the paper's own zoning curve (\S6.3; LoRA lands above, not on, the curve); but a budget-matched LoRA r=64 ($\sim$992k trainable $\approx$ FMSP's budget; r=64 EM is s42-only, while the FMSP reference is 3-seed) recovers $\sim$85\% of FMSP EM (478/566 vs 563.7/653.3), confirming the binding variable is the trainable budget, not the rank-family --- with a residual $\sim$15\% gap showing the low-rank subspace costs real precision at equal parameter count (\S6.5 point 1, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}). BitFit updates only the bias vectors; it is structurally impossible on the V88 transformer (no biases anywhere) and measured-inert on the V87 mixer (77 bias vectors, 7{,}931 trainable scalars, 0/0/0 EM under P05; \S6.5). Houlsby adapters sit at the bottleneck of every transformer block; the recipe here is byte-level MLP-Mixer [Tolstikhin et al., 2021] without attention or recurrence, and a single-point adapter at the output norm is a structurally different placement. FishMask and ChildTuning select parameters to update by information-theoretic criteria, but they were validated on BERT-scale encoders. LoRA, BitFit, and a controlled full-FT baseline are measured at this scale in \S6.5; Houlsby adapters, FishMask, and ChildTuning were not.
+
+This paper introduces FMSP (Fine-tuning with Minimal Parameter changes for Small-parameter LMs). The name is historical --- at the 1M scale FMSP trains $\sim$95\% of scalars and its differential value is not parameter minimality (\S3.8, \S6.5); it is retained for continuity with the project's recipe registry. FMSP is a five-phase pipeline: Fisher-guided per-scalar freezing of a small fraction of parameters, a true-freeze restore-after-step mechanism that defends against optimizer weight-decay leakage, a single-point zero-init adapter, and a composite objective that combines answer-only cross-entropy with two KL-preservation terms. The registered recipe on the V76-RPG backbone is the P05 recipe: freeze 5\%, true freeze, answer-only CE, probe-KL weight 0.5, KL\_qa weight 0.05, adapter rank 16, AdamW at 1e-3 with weight decay 0.01, WSD schedule, 10 epochs, best-validation-loss checkpoint, seeds 42/43/44.
+
+The paper makes six contributions, organized around four durable findings that survive the \S6.5 controlled full-FT baseline: (i)~the composite objective (answer-only CE plus probe-KL) is the first-order variable at this scale --- not the freeze-plus-adapter machinery; (ii)~the AdamW freeze leak and its restore-after-step fix; (iii)~the zoning falsification plus the trainable-budget curve; and (iv)~the recipe as an architecture-level variable. FMSP and its registered P05 configuration are the vehicle that established these findings, not the headline finding itself. Three of the four (the AdamW leak, the falsification, and the recipe-as-architecture-level-variable meta-finding) travel beyond this project to any freeze-style PEFT.
+
+\begin{enumerate}
+\item \textbf{The composite objective as the first-order variable, with P05 as the vehicle (\S3, \S4.4, \S5, \S6.5).} The load-bearing finding is that the composite objective --- answer-only cross-entropy plus probe-KL anchoring (conservation, not replay: KL to the frozen backbone on probe data with zero CE, so no capacity is spent on probe content) --- is what carries memorization and language preservation at this scale, not the freeze-plus-adapter machinery. P05 is the registered configuration that established this: Fisher-guided per-scalar freeze of the top 5\%, zero-init rank-16 adapter at the final norm (4{,}096 parameters at d\_model=128: 0.41\% of the 1M preset; the rank-16 adapter scales with d\_model, reaching 5.3\% of the 10K preset), answer-only cross-entropy, and probe-KL at weight 0.5. The first regime in the project to memorize (EM 544.3/988, three seeds) while preserving language (Discord perplexity 3.68 vs 47 to 64 under prior FMSP regimes (C1 stage 47.8-50.8; V76-f05 51-64, 3 seeds), vs 3.31 backbone (Discord language-preservation battery)). The composite loss is \texttt{L = CE\_answer + 0.05 $\cdot$ KL\_qa + 0.5 $\cdot$ KL\_probe}, with AdamW at 1e-3, weight decay 0.01, WSD schedule, 10 epochs, best-validation-loss checkpoint, seeds 42,43,44. The \S6.5 controlled full-FT baseline (same objective, no freeze, no adapter) reframes this contribution: at 1M, full-FT matches or exceeds P05 on memorization (594.0/663.0 vs 563.7/653.3 on V87/V88) and Discord perplexity (3.65/3.51 vs 3.66/3.52), so the composite objective --- not the freeze-plus-adapter machinery --- carries memorization and language preservation at this scale; the freeze-plus-adapter is load-bearing instead for the OOD boundary, which full-FT loses on the legacy collapse-blind metric (16.9/22.0 vs 6.8/8.5 hijack, s42; under collapse-inclusive 3-seed rescoring the gap attenuates to tied on V87, $-8.5$ pp robust on V88 --- \S6.5 point 3).
+
+\item \textbf{A measured, portable gotcha for any freeze-style fine-tuning (\S3.3, \S4.4).} Gradient-hook freezing is not freezing: AdamW's decoupled weight decay shrinks ``frozen'' scalars regardless of gradient (measured 4.69\% uniform shrink of 49{,}663 supposedly frozen scalars; WSD-aware theory predicts 4.65\%). The fix is a snapshot-and-restore after every optimizer step, which is optimizer-agnostic and brings the frozen-region change to exactly 0.00\%. The full mechanism, measurement, and theoretical prediction are in \S3.3; this finding applies to every PEFT method that freezes by gradient masking (Fisher masks, partial freezing, sparse updates), not just this project.
+
+\item \textbf{A falsification result with structural implications, now with a budget-matched success case (\S4.5, \S6.3, \S6.5).} Gradient zoning, that is, partitioning the parameter set into a memorization zone and a bit-frozen rest, fails at every zone size. Full-988 exact-match collapses monotonically 544 to 425 to 244 to 2 to 0 as the trainable set shrinks from $\sim$947k to $\sim$700k to $\sim$501k to $\sim$302k to $\sim$39k, while question-relevance hijack gets worse (9\% to 67\%) and OOD hijack also gets worse (16.9\% to 54.2\%). In a sub-1M language model, within the zoning configurations tested at this scale, memorization and boundary hijack cannot be separated by parameter partitioning. The slogan ``freeze the language, train the facts'' is not achievable by parameter partitioning. The mechanism map that fell out of the zone-ablation diagnostics is also portable: the adapter is the question-recognition mechanism, the Fisher band carries memorized-answer content, and the remixer is load-bearing for language (Discord perplexity 3.70 to 5.15 when removed). The same trainable-budget curve that the zoning sweep traces is confirmed by a success case: a budget-matched LoRA r=64 ($\sim$992k trainable on V87, $\approx$ FMSP's $\sim$951k; r=64 EM is s42-only, while the FMSP reference is 3-seed) reaches $\sim$85\% of FMSP EM (478/566 vs 563.7/653.3), so the binding variable is the trainable budget, not the full-rank parameterization --- while a residual $\sim$15\% gap shows the low-rank geometry is a real second-order term (\S6.5 point 1, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}).
+
+\item \textbf{A lesson for instruction-tuning tiny models generally (\S4.4 Stage 2).} Objective-level forgetting fixes beat structural ones. Answer-only CE was the largest single-component gain in the project's history (+124 EM, 581.3 mean over V76-f05's 457.0). Full-sequence CE was what taught the QA format as an unconditional trigger (988 answers $\times$ 9 paraphrases $\times$ 10 epochs on the question bytes). For any small parametric-budget model where the format is dominantly frequency-bearing, restricting cross-entropy to the answer region is the load-bearing intervention, larger than the architecture choices around it.
+
+\item \textbf{A cheap, reproducible recipe for tiny-model evasion (abstention by self-distillation; evasion style, not calibrated honesty; \S4.6, \S7.1).} Abstention by self-distillation. 2{,}425 unanswerable questions are answered by the V76-RPG backbone itself at temperature 0.9, filtered to evasive-only (no memorized entity, no assert-verb-plus-year, no invented capitalized entity, $\geq$3 words, distinct-2 $\geq$ 0.5), with all answers unique, mixed at $\sim$20\% of training data. Fabrication on 18 unanswerable questions halves (16.7 to 8.3/18; an upper bound, since the evasive-answer filter and the fabrication scorer share one classifier family) at zero memorization cost (EM dose-invariant 534.7 to 549 across 1 to 25\% dose). The same data is also evidence for the repetition theory of small-LM memorization: evasive answers never repeat, so FMSP's repetition-based memorization leaves them capacity-free.
+
+\item \textbf{A meta-finding on the architecture-versus-recipe confound (\S4.7, \S7.2).} Under one registered recipe, four of five old-era families moved by hundreds of exact-match (V46-3 to 431.3, V58 to 455.0, V59 to 436.0, V52 to 560.7). The long-standing ``routing ceilings'' reported earlier in the project were recipe artifacts, not architecture-level ceilings. The implication is methodological: in this regime, recipe choices (freeze fraction, freeze mechanics, CE scope, KL anchoring) are architectural variables that can swing exact-match by hundreds of points at the same parameter count. The \S6.5 controlled PEFT baselines strengthen this meta-finding: at a fixed 1M backbone, LoRA r=16 reaches only 5.3 EM (V87) while full-FT reaches 594.0 EM --- a recipe-level swing of nearly 600 exact-match points at the same parameter count --- and the binding axis is the trainable-parameter budget (the same zoning curve as V78), confirming that the recipe, not the architecture family, is the first-order variable in this regime.
+\end{enumerate}
+
+Two companion papers complete the series. Part 1 develops the CCD-Mixer architecture and presents the six-budget scaling study [Lee, Part 1 of this series, companion paper]. Part 3 studies pretraining-corpus choice on the same twelve models and reports that chat-format curation is the first-order variable for capability at the 1M budget (the architecture term remains robust at $\leq$500K) [Lee, Part 3 of this series, companion paper]. The present paper is part 2.
+
+A note on scope. The largest model in this paper has 996{,}873 parameters (the V87/V83-RPG chassis, the final CCD-Mixer used in the \S5 scaling study); the V76-RPG backbone on which P05 was developed has 993{,}254 parameters, so the registered 49{,}663 frozen scalars = round(993{,}254 $\times$ 0.05). The QA corpus is 9{,}012 train and 988 held-out; the evaluation budget is 10 fine-tuning epochs per seed across three seeds. The findings are about what fine-tuning can recover at the sub-million-parameter scale, not about state-of-the-art language modeling or general PEFT.
+
+\textbf{Glossary of project terms.} The following jargon is used throughout this paper (the \S3.7 Metrics glossary covers table-shorthand columns separately):
+
+\begin{itemize}
+\item \textbf{Registered} --- a model configuration frozen in the project's public log under a fixed decode protocol; registered numbers are the citable artifacts.
+\item \textbf{Chatter} --- a 9-prompt open-conversation battery (``how are you?'', ``i'm feeling kind of tired today'', etc.) measuring whether the model can still hold a casual register after fine-tuning; scored by perplexity and distinct-2.
+\item \textbf{Echo} --- a generation that engages the question: it mentions at least one question content word (a weaker condition than byte-exact EM). Used on both the question-relevance battery and (as one of three classes, alongside hijack and free) the OOD battery (\S3.7).
+\item \textbf{Hijack} --- on the question-relevance battery (100 unseen near-distribution questions), a generation that regurgitates a memorized QA answer instead of answering the question naturally. Lower is better.
+\item \textbf{OOD hijack} --- the same regurgitation failure but on 59 out-of-distribution prompts (casual or off-domain). Lower is better; this is the metric that collapses under periodic-orbit loops (see ``collapse-inclusive'' below).
+\item \textbf{Zoning} --- partitioning the parameter set into a memorization zone and a bit-frozen rest (\S4.5/V78). Falsified: within the zoning configurations tested at this scale, memorization and hijack cannot be separated by parameter partitioning.
+\item \textbf{Fabrication} --- on 18 unanswerable questions (fabricated entities, absurd prompts, unknowable facts), a generation that asserts a confident factual answer instead of refusing or hedging. Lower is better.
+\item \textbf{Collapse-inclusive} --- a rescoring protocol for OOD hijack that also counts periodic-orbit loops (a word-3-gram repeating $\geq$5$\times$) as hijack; the legacy detector was collapse-blind (a loop matched no memorized answer, so it scored as ``free''). See \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md}.
+\end{itemize}
+
+Table~\ref{tab:nomenclature} is the quick-lookup companion to the glossary: every recipe tag, version and arm tag, and metric shorthand used in this paper, in one place.
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption{Nomenclature. Project-internal recipe tags, version and arm tags, and metric shorthand used throughout this paper.}
+\label{tab:nomenclature}
+\begin{tabular}{p{0.24\linewidth} p{0.70\linewidth}}
+\toprule
+Term & Meaning \\
+\midrule
+FMSP & Fine-tuning with Minimal Parameter changes for Small-parameter LMs; the five-phase pipeline of \S3 (the name is historical: $\sim$95\% of scalars are trainable at 1M). \\
+P05 & The registered FMSP recipe: freeze 5\% true-freeze + answer-only CE + probe-KL 0.5 + rank-16 adapter; full spec \S3. \\
+P10 / P20 / M05 & Probe-KL weight 1.0 / 2.0 variants and the margin-loss arm V77-M; P10 breaches the 10\% qrel guard, M05 was rejected outright. \\
+V76-f05 / C1 / C2 & The pre-P05 regime at freeze 0.05 (``old canonical,'' EM 457 $\pm$ 32) and the two V77 staged fixes: C2 true freeze (restore-after-step), C1 answer-only CE. \\
+canonical & The inherited pre-P05 default recipe (freeze 0.50, rank 16, KL 0.05, lr 1e-3, 10 epochs, 9k/988 split). \\
+composite objective & Answer-only CE plus probe-KL (plus KL\_qa); the paper's first-order variable. \\
+probe-KL / KL\_qa & KL to the frozen backbone on probe data (zero CE: conservation, not replay) and on QA positions. \\
+probe set & 1{,}200 register anchors + 800 unseen small-qa-en-1k questions + 60 fixed OOD prompts; disjoint from eval. \\
+full-FT & The controlled baseline: full fine-tuning under the P05 objective, no freeze, no adapter (\S6.5). \\
+9k/988 split; selection-on-eval & Group-aware 9{,}012 train / 988 held-out paraphrase split; the best-val-loss checkpoint is selected on the same 988 set used for EM (bias bounded at 0). \\
+WSD & Warmup-stable-decay LR schedule. \\
+\midrule
+V76-RPG & The 993{,}254-parameter backbone P05 was developed on; RoPE on both conv value and gate pathways (RPG pattern). \\
+V83-RPG / V87 / V88 & V83-RPG is the census-champion arm (CCD block on V76-RPG); V87 freezes it verbatim (arm parameter removed, ctx 1024, six budgets); V88 is the vanilla-transformer reference at the same six budgets. \\
+H95 & V78 zoning arm at freeze 0.05 ($\sim$947k trainable), the P05-equivalent control of the zone sweep (H70/H50/H30/SC = freeze 0.30/0.50/0.70/1.00). \\
+Fisher band / remixer sidecar & The zone-ablation mechanism map: the low-Fisher trainable band carries memorized content; the remixer sidecar is load-bearing for language. \\
+A01--A25 & V79 abstention dose arms (X\% of training data replaced by self-distilled evasive answers); A20 = $\sim$20\% dose, the registered near-balance point; A25 = 25\% dose, the OOD champion. \\
+census arms & Old-era families re-run under P05 in the V86 census: V46-3/V52/V58/V59, the FSC (factorized state/content) arms V80-TsR/V86-TsR, and V85-NoRemix (sidecar deleted); TsR is the best-EM FSC arm tag. \\
+S-FLM & Hyperspherical flow LM (V50); not P05-alignable. \\
+\midrule
+full-988 EM & Exact match on the 988 held-out paraphrases of trained answers; verbatim answer retrieval, not semantic knowledge. \\
+chatter d2 / Discord PPL & Distinct-2 and post-FMSP perplexity on the 9-prompt chatter battery (backbone baseline 3.31); d2 saturated at 1.0 (``1.0 sat'') is the QA-regurgitation failure mode, not success. \\
+qrel echo / hijack; guard / bar & Shares of the 100-question question-relevance battery that engage the question / regurgitate a memorized answer; bars: echo $\geq$ 50\%, hijack $\leq$ 10\% guard, EM $\geq$ 455. \\
+OOD echo / hijack / free & The three-way classification on the 59 OOD prompts. \\
+fabrication X/18 & Fabricated answers among 18 unanswerable questions (plus 6 controls). \\
+EM=0 floor & Full-988 EM exactly 0 at $\leq$100K on every seed and architecture; coincides with end-of-epoch train CE $\gtrsim$ 0.77. \\
+register / QA-ified & Register = the style of the training distribution (here casual discord conversation); QA-ified = chatter degraded into unconditional QA-regurgitation. \\
+s42/s43/s44 & FMSP seed shorthand; the backbone is a single seed-42 pretrain (n=1). \\
+analysis note & A post-registration companion analysis that re-measures registered claims without re-registering them. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Related Work}
+
+\textbf{Low-Rank Adaptation (LoRA).} LoRA [Hu et al., 2022] introduced per-layer low-rank updates as a parameter-efficient alternative to full fine-tuning for large transformer language models. The assumption is that weight updates live on a low-dimensional subspace, so a rank-$r$ projection ($r$ typically 4 to 64) is sufficient. FMSP shares LoRA's ``minimal parameter changes'' framing but diverges on three structural points. First, LoRA assumes redundant capacity; FMSP assumes every parameter is load-bearing and so freezes the most Fisher-informative 5\% rather than adding new capacity uniformly. Second, LoRA has no explicit anti-forgetting mechanism; FMSP uses two KL-preservation terms. Third, LoRA places updates on every linear layer; FMSP places a single rank-16 adapter at the final norm (4{,}096 parameters at d\_model=128: 0.41\% of the 1M preset, scaling with d\_model to 5.3\% of the 10K preset).
+
+\textbf{Houlsby adapters.} Adapters [Houlsby et al., 2019] introduced bottleneck modules inserted after the attention and feed-forward sub-layers of a transformer block. FMSP's adapter is a single point at the final norm, not a per-block bottleneck. The project's byte-level MLP-Mixer architecture has no attention or feed-forward sub-layers in the transformer sense, so the Houlsby placement does not apply directly.
+
+\textbf{BitFit.} BitFit [Ben-Zaken, Ravfogel, and Goldberg, 2022] updates only the bias vectors of a pretrained transformer, leaving all weights frozen. FMSP's per-scalar freeze mask is finer than BitFit's all-or-nothing bias update: FMSP freezes individual scalars across the entire parameter set by Fisher score. The registered architectures split on BitFit: the V88 transformer control has no bias parameters anywhere (verified in \texttt{src/model\_v88\_transformer.py}: no biases in the attention QKV/O projections or the MLP), so BitFit is structurally impossible on that chassis; the V87 mixer, by contrast, has 77 bias vectors --- 7{,}931 trainable scalars --- (token\_mix and channel\_mix projections, the depthwise conv, the remixer sidecar), so BitFit is applicable on V87. BitFit was measured on V87 in \S6.5: with its 77 trainable bias vectors (7{,}931 scalars) under the P05 objective it is inert (0/0/0 EM, never learns the QA task; qrel echo 3.0, Discord PPL 3.44), consistent with the trainable-parameter-budget reading of the zoning curve. BitFit on V88 remains structurally impossible.
+
+\textbf{FishMask and Child-Tuning.} FishMask [Zhao et al., 2020] learns a stochastic binary mask over pretrained parameters and only updates the unmasked subset. ChildTuning [Xu et al., 2021] updates only a ``child network'' subset of parameters chosen by Fisher information. FMSP's freeze mask is the same family of idea (Fisher-informed parameter selection) but the project's regime is sub-1M autoregressive byte-level, not BERT-scale encoder classification. Both cited works evaluate BERT-scale or larger models and establish methodological ancestry rather than direct evidence at this scale.
+
+\textbf{Catastrophic forgetting and KL anchoring.} FMSP's two KL terms implement a distribution-level defense against forgetting: the fine-tuned model's logits on the QA batch and on a disjoint probe batch are pulled toward the frozen-backbone logits by KL divergence. This is frozen-self-teacher distillation in the lineage of Hinton et al. [2015] and Learning-without-Forgetting [Li and Hoiem, 2017]. The parameter-level equivalent --- penalize changes to Fisher-important scalars --- is implemented by the freeze mask itself, a hard constraint variant of Elastic Weight Consolidation [Kirkpatrick et al., 2017], which regularizes the same Fisher-weighted parameter drift with a soft quadratic penalty rather than a bit-exact mask.
+
+\textbf{Knowledge capacity and memorization scaling.} The knowledge-capacity work of Allen-Zhu and Li [2023; 2024] established scaling laws for how many bits of factual knowledge a transformer can store per parameter. Carlini et al. [2022] quantified memorization across language models and provided the methodological reference for the exact-match memorization battery. The empirical finding in \S5, that the memorization floor under P05 is consistent across both architectures in this panel (n = 2) and sits between 100K and 300K parameters, is consistent with the qualitative shape of those scaling laws at a regime where they had not previously been measured.
+
+\textbf{Attention-free token mixing.} The host architectures come from the attention-free mixing lineage: MLP-Mixer [Tolstikhin et al., 2021] and gMLP [Liu et al., 2021] established all-MLP token mixing; Hyena [Poli et al., 2023] introduced the gated long convolution the project's backbone era builds on; S4 [Gu et al., 2022], H3 [Fu et al., 2023], and Mamba [Gu and Dao, 2023] are the state-space alternative; FNet [Lee-Thorp et al., 2022] mixes tokens with Fourier transforms; Synthesizer [Tay et al., 2021] replaces query-key attention with synthesized attention matrices. The final chassis uses none of these mechanisms beyond the gated long convolution; the architecture search itself is [Lee, Part 1 of this series, companion paper].
+
+\textbf{What FMSP is not.} FMSP is not a substitute for LoRA at the 7B-plus scale (the assumptions about redundant capacity apply there, not here). FMSP shares mechanism ancestry with the continual-learning family --- the freeze mask is a hard Fisher mask in the lineage of EWC [Kirkpatrick et al., 2017], and the probe-KL term is frozen-self-teacher distillation in the lineage of LwF [Li and Hoiem, 2017] and knowledge distillation [Hinton et al., 2015] --- but differs on four axes: the constraint is hard (bit-exact mask) rather than soft (quadratic penalty or logit regression); the objective is conservation (KL to the frozen backbone on probe data with zero CE), not replay (no labeled task stream is rehearsed); the regime is sub-1M byte-level autoregressive, not encoder-classification or large-decoder; and there is a single fine-tuning task, not a continual stream of tasks. FMSP is not an architecture; it is a fine-tuning recipe that operates on top of any pretrained autoregressive byte-level LM.
+
+\section{Method}
+
+The FMSP pipeline is implemented in \texttt{src/fmsp.py} and run from \texttt{experiment\_10k.py}. There are five phases.
+
+\subsection{Phase 0: frozen reference snapshot}
+
+Before any FMSP parameter is modified, the pretrained backbone is deep-copied, set to evaluation mode, and has all parameters marked \texttt{requires\_grad=False}. This snapshot is the KL anchor for the entire run:
+
+\begin{lstlisting}
+ref_model = copy.deepcopy(model)
+ref_model.eval()
+for p in ref_model.parameters():
+    p.requires_grad = False
+\end{lstlisting}
+
+Two of the four loss terms (KL\_qa and KL\_probe, \S3.5) compute divergence against this frozen reference. The reference is never updated during fine-tuning.
+
+\subsection{Phase 1: Fisher Information Profiling}
+
+Diagonal Fisher information is estimated on pretraining data, using the LM's own cross-entropy objective. For each scalar parameter $\theta_i$, the estimate is:
+
+\begin{lstlisting}
+F_i $\approx$ (1 / N) $\Sigma_n$ ($\partial$ CE_n / $\partial \theta_i$)^2
+\end{lstlisting}
+
+The estimate is accumulated over \texttt{fisher\_num\_samples} batches (default 500; the registered 10k recipe uses 200). The model runs in training mode, gradients are accumulated as \texttt{p.grad.detach().pow(2)}, divided by the batch count, then zeroed. Micro-batch size is 4. The pretraining data stream is the Discord-Dialogues dataset [Discord-Dialogues] (200K samples), and the Fisher window is the first 2{,}000 samples of the stream so that the probe set in Phase 4 can use samples 2{,}001 through 3{,}200 without leakage.
+
+\subsection{Phase 2: per-scalar freeze mask with true freeze}
+
+All Fisher scores are flattened across all parameter tensors into one global vector. The top-$k$ scalars by Fisher score are selected via \texttt{torch.topk} (which avoids quantile ties that arise when bucket embeddings have Fisher score zero) and form the freeze set:
+
+\begin{lstlisting}
+n_total = sum(p.numel() for p in model.parameters())
+n_freeze = round(n_total * freeze_fraction)
+flat_fisher = torch.cat([f.flatten() for f in fisher_list])
+_, topk_idx = torch.topk(flat_fisher, n_freeze, largest=True)
+mask[topk_idx] = True
+\end{lstlisting}
+
+The registered recipe uses \texttt{freeze\_fraction = 0.05} (5\% of all scalars frozen). The mask is finer than \texttt{requires\_grad=False}: it is applied as a backward hook per tensor, multiplying each gradient by a \texttt{keep = \textasciitilde{}mask} vector. Optimizer parameter groups are not touched; all parameters remain in the optimizer state.
+
+\textbf{True freeze (restore-after-step).} Gradient-hook freezing alone does not freeze. AdamW's decoupled weight decay shrinks ``frozen'' scalars regardless of whether they receive gradient. The project measured a 4.69\% uniform shrink of 49{,}663 supposedly frozen scalars in one run (with standard deviation 0.000005 across ratios, consistent with a uniform operation). The WSD-schedule-aware theoretical prediction is 4.65\%, matching the measurement. True freeze snapshots \texttt{p.data[mask].clone()} from pretrained weights before training begins, and after every \texttt{optimizer.step()} restores the masked entries bit-exactly:
+
+\begin{lstlisting}
+with torch.no_grad():
+    for p, mask in zip(model.parameters(), masks):
+        p.data[mask] = snapshot[mask]
+\end{lstlisting}
+
+The mechanism is optimizer-agnostic and correct on every registered arm; the frozen-region scalar change is exactly 0.00\% on all V78 zoning arms. Empty masks no-op.
+
+\subsection{Phase 3: task adapter injection}
+
+A small bottleneck adapter is attached to the model's final norm (\texttt{out\_norm}, before the tied output head) via a forward hook. The adapter is:
+
+\begin{lstlisting}
+adapter(x) = dropout(Linear_up(GELU(Linear_down(x))))
+\end{lstlisting}
+
+with \texttt{Linear\_down: d\_model $\to$ r}, \texttt{Linear\_up: r $\to$ d\_model}, no biases. Initialization is Kaiming uniform for \texttt{Linear\_down} and \textbf{zeros for \texttt{Linear\_up}}, so the adapter is the identity function at the start of training. A self-test asserts that the adapter-off forward pass matches the pretrained baseline with \texttt{max\_diff < 1e-5}. The registered recipe uses rank 16; at \texttt{d\_model = 128} this is 2 $\cdot$ 128 $\cdot$ 16 = 4{,}096 parameters (0.41\% of the 996{,}873-param 1M preset; the rank-16 adapter scales with d\_model, so the fraction is preset-dependent and reaches 5.3\% of the 9{,}666-param 10K preset). The adapter is the only place FMSP adds capacity.
+
+\subsection{Phase 4: composite loss fine-tuning}
+
+The total per-step loss is:
+
+\begin{lstlisting}
+L = CE_answer + $\lambda_1 \cdot$ KL_qa + $\lambda_2 \cdot$ KL_probe + $\lambda_3 \cdot$ L_margin
+\end{lstlisting}
+
+with $\lambda_1$ = \texttt{kl\_weight} = 0.05, $\lambda_2$ = \texttt{probe\_kl\_weight} = 0.5 (P05) or 1.0 (P10), and $\lambda_3$ = 0 in the registered recipe (the margin arm was rejected; see \S4 and \S6). The registered $\lambda_2$ inventory is 0.5 (P05, adopted), 1.0 (P10), and 2.0 (P20).
+
+\textbf{Answer-only CE.} Per-position cross-entropy is computed with \texttt{ignore\_index=pad}. The loss at position $t$ is kept only if the target byte at position $t+1$ (the standard autoregressive shift) is an answer byte:
+
+\begin{lstlisting}
+loss_mask[t] = a_mask[t+1]
+\end{lstlisting}
+
+The last position is zeroed. Question bytes receive zero gradient. Validation uses the same masked CE so checkpoint selection matches the training objective. The C1 ablation (\S4) shows that answer-only CE is the largest single-component gain in the project's history.
+
+\textbf{KL preservation (KL\_qa).} For every non-pad position of the full QA sequence:
+
+\begin{lstlisting}
+KL_qa = mean_{non-pad} $\Sigma_v$ p_ft(v) $\cdot$ (log p_ft(v) $-$ log p_ref(v))
+\end{lstlisting}
+
+where \texttt{p = softmax(logits / T)} at temperature T = 1.0. Even under answer-only CE the KL\_qa term is computed over all non-pad positions, so the question bytes also anchor the fine-tuned distribution toward the reference.
+
+\textbf{Probe-KL (KL\_probe).} Per step, one cyclic probe batch is loaded. The probe set has three disjoint components: 1{,}200 register anchors (register: training-distribution style) from the same pretraining stream (sample indices 2{,}001 through 3{,}200, disjoint from the Fisher window), 800 unseen small-qa-en-1k questions formatted as \texttt{User: \{q\}\textbackslash n\textbackslash nAssistant: } with the 100 question-relevance evaluation questions excluded by normalized-string match (102 excluded including 2 duplicates; the project logs a loud warning if the count is not exactly 100), and 60 fixed OOD prompts from \texttt{ood\_trainprobe\_v77.txt} (disjoint from the 59-prompt \texttt{ood\_eval\_v77.txt} evaluation set). KL to the frozen backbone over all non-pad positions. \textbf{No CE on probes, so the term is conservation, not replay: zero capacity is spent learning probe content.} A distributional-overlap caveat: the 60 train-probe OOD prompts and the 59 eval OOD prompts are textually disjoint but share the same 6-category register (casual, absurd, non-English, code, fragment, statement), so part of the OOD-hijack improvement attributed to probe-KL could in principle be register-specific regularization rather than general distribution conservation. The OOD-free probe ablation settles this (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PROBE_ABLATION_AND_SELECTION_ANALYSIS.md}{PROBE\_ABLATION\_AND\_SELECTION\_ANALYSIS.md}): re-running V87-1M P05 s42 with the 60 OOD prompts removed from the probe set leaves the collapse-inclusive OOD essentially unchanged (33.9\% versus 35.6\%, inside noise), with EM, qrel, and Discord PPL likewise unchanged --- so the boundary discipline that survives collapse-rescoring is general conservation, not same-register probe leakage. The 60 OOD probes do specifically regularize the legacy direct-regurgitation failure mode (legacy OOD rises from 6.8\% to 20.3\% without them), but under the collapse-inclusive metric that regularization only redistributes the same failures into the loop-collapse mode; claims leaning on the legacy 6.8\% number should therefore be read as ``probe-regularized'', while the paper's primary (collapse-inclusive) OOD claims are not.
+
+\textbf{Probe margin (rejected).} A margin loss sets an entropy floor at probe answer-start positions: \texttt{L\_margin = mean relu(H\_target $-$ H(p\_t))} where \texttt{H(p\_t) = $-$(p $\cdot$ log p).sum(-1)}. The H\_target was set from measured backbone answer-start entropy on 800 probe 1k questions (3.59 nats). The registered M05 arm used $\lambda_3$ = 0.5. This arm was rejected; see \S4 and \S6.
+
+\subsection{Optimization and data}
+
+The optimizer is AdamW [Loshchilov and Hutter, 2019] with learning rate 1e-3, weight decay 0.01, gradient clipping at 1.0. The learning rate schedule is WSD (warmup-stable-decay [Qin et al., 2024]: linear warmup over 10\% of total steps, stable at 70\%, linear decay to zero). Training runs for 10 epochs with batch size 16; the checkpoint with the best validation loss is auto-selected. Three seeds are run by default: 42, 43, 44.
+
+The QA corpus is \texttt{small-qa-en-10k} [small-qa-en-10k], a 10{,}000-pair general-knowledge dataset. The split is group-aware: each unique answer has approximately 10 paraphrased questions, 9 variants go to training, the last variant goes to the held-out validation set. This produces 9{,}012 training pairs and 988 held-out paraphrases with full answer overlap (12 of the 1{,}000 base answers contribute all 10 paraphrases to train; the remaining 988 follow the 9-train/1-held-out split, giving 8{,}892 + 120 = 9{,}012 train and 988 held-out). Sequences are capped at 1{,}024 bytes.
+
+\textbf{Checkpoint selection and evaluation share one held-out set (selection-on-eval).} The checkpoint used for every reported EM number is the one with the best validation loss, where validation loss is computed on the same 988 held-out paraphrases (\texttt{experiment\_10k.py} \S best-val-loss selection). These 988 items are never trained (they are the held-out tenth paraphrase of each answer), but checkpoint selection and the reported EM evaluation draw from the same set. This is selection-on-eval, not selection-on-test (no held-out item ever enters the training gradient); the risk it creates is optimistic bias on the reported EM from picking the epoch that happened to score best on the eval set, not leakage of answer content. A 494/494 split quantification bounds this bias at zero (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PROBE_ABLATION_AND_SELECTION_ANALYSIS.md}{PROBE\_ABLATION\_AND\_SELECTION\_ANALYSIS.md}): because answer-only val\_loss decreases monotonically through all 10 P05 epochs on the full 988 and on both 494-halves independently, the best-val-loss epoch is the same whether selection sees the full eval set or only a disjoint half, and the debiased EM reconstructs the registered value exactly. Given that P05 does not overfit the 988 within 10 epochs, the selection-on-eval bias is 0 EM at this checkpoint and seed; the bound would need re-checking in a regime where val\_loss turns upward earlier.
+
+\subsection{Generation and evaluation protocol}
+
+Prompts are formatted as \texttt{User: \{q\}\textbackslash n\textbackslash nAssistant: }. The trailing EOS is stripped (the byte tokenizer appends EOS to all encoded inputs; the two inference bugs at V55 and V56; see \S4.1). Generation is greedy at temperature 0.0 with repetition penalty 1.2 and no-repeat-ngram size 4, capped at 200 new tokens. The five axes reported in \S5 are full-988 exact-match (EM), echo (the generation engages the question --- it mentions at least one question content word, a weaker condition than byte-exact EM) and hijack on unseen question-relevance prompts, OOD hijack on 59 prompts, Discord validation perplexity, and fabrication on 18 unanswerable questions. Every generation-based metric in this paper is measured under this registered decode configuration (greedy, repetition penalty 1.2, no-repeat-4-gram). In this codebase (the registered generate() in \texttt{src/model\_v71\_rtm.py}, inherited by V87 and mirrored in V88), both knobs are applied only inside the sampling branch, so under temperature 0 the greedy branch takes argmax on unmodified logits and the knobs are inert. Raw-greedy verification across all 24 pretrained backbones produced byte-identical outputs to the registered runs, so the anti-collapse and boundary numbers never had decode assistance. The chatter distinct-2 metric is a reference-free internal-diversity measure, not a direct fluency measure.
+
+\textbf{Metrics glossary.} The tables in \S4--\S6 use these shorthand columns: FT\% = teacher-forced answer accuracy (argmax at each answer position, fed the prefix); P3\% = position-3 accuracy (teacher-forced first answer byte at position 3); WO = word-overlap ratio (fraction of generated-answer content words also in the true answer); mgl = mean margin-loss value (the \texttt{L\_margin} term of \S3.5); controls = control questions passed out of 6 (the 6 real-knowledge CONTROLS in \texttt{eval\_unanswerable\_v77.py}); unique gens = distinct generations out of 18 (diversity across the 18 unanswerable probes).
+
+\subsection{Why FMSP and not LoRA at the sub-1M scale}
+
+\begin{table}[!t]
+\centering
+\small
+\caption{Structural comparison of LoRA, FMSP, and full-FT (under the P05 objective) at the sub-1M scale.}
+\label{tab:3-8-struct}
+\begin{tabular}{p{0.20\linewidth} p{0.25\linewidth} p{0.22\linewidth} p{0.25\linewidth}}
+\toprule
+Aspect & LoRA & FMSP & Full-FT (under P05 objective) \\
+\midrule
+Designed for & Large models (7B+) & Small models (less than 1M) & Small models (less than 1M) \\
+Assumption & Redundant capacity & Every parameter matters & Every parameter matters \\
+Update placement & Uniform low-rank on every linear & Selective, Fisher-guided per-scalar & Every scalar \\
+Anti-forgetting & None & Explicit KL preservation plus probe-KL & Explicit KL preservation plus probe-KL (from the objective, not from vanilla full-FT) \\
+New parameters & 2$\cdot$r$\cdot$$\Sigma$(d\_in $\cdot$ d\_out) per layer & 2$\cdot$d\_model$\cdot$r (single point) & 0 \\
+Trainable params at 1M & 248k (r=16, V87) / 182k (r=16, V88) & $\sim$951k of 997k $\approx$ 95.4\% & 997k = 100\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The single-point adapter at the output norm is 4{,}096 parameters at d = 128, r = 16, versus LoRA's per-layer rank-$r$ updates summed across every linear in the block. The Fisher-guided freeze of the top 5\% (49{,}663 scalars on the 993{,}254-param V76-RPG backbone, so 49{,}663 = round(993{,}254 $\times$ 0.05)) gives an information-theoretic instead of structural criterion for what to leave alone. Together, these three design choices target the regime where LoRA's assumptions do not hold. A caveat this table alone hides, measured in \S6.5: at 1M, FMSP leaves $\sim$95.4\% of scalars trainable and the controlled full-FT baseline (100\% trainable, same P05 objective) matches or exceeds FMSP on memorization and language preservation --- so the freeze-plus-adapter's differential value at 1M is OOD boundary discipline (a direction claim, not a memorization-capability claim), and that direction itself attenuates under collapse-inclusive rescoring (tied on V87 at 3 seeds, robust on V88; \S6.5 point 3, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md}). Note that the Full-FT column here is full-FT-under-the-P05-objective (the controlled baseline of \S6.5), not vanilla full-FT: the anti-forgetting behavior comes from the composite objective (answer-only CE plus probe-KL), not from full fine-tuning itself --- vanilla full-FT under the old objective destroys the language model (\S6.5 point 2; abstract).
+
+\section{Genesis and Recipe Search}
+
+This section is the chronological story of how P05 was found. The version numbers (V46 through V86) refer to design notes archived in the project's public repository. The experimental record behind every claim is the source for the numbers in \S5.
+
+\subsection{The early era: memorization works, recall fails (V46-V57)}
+
+FMSP was introduced at V46 (2026-07-06) as Fisher-guided per-scalar freezing plus a zero-init rank-$r$ adapter plus KL preservation, applied to three hosts (729k to 961k parameters, 640 to 1{,}024 adapter at r=4). The era's central negative result, sharpened across five paradigms (V46, V50, V51, V52-V53, V54): every configuration memorized the training set (train accuracy 86.5\% to 98.7\%, train cross-entropy 0.034 to 1.21) yet scored 0/100 to 0/1000 exact-match generation --- the failure was in recall, not memorization, initially misdiagnosed as a capacity ceiling. The ``ceiling'' turned out to be two inference bugs (a shifted next-token offset and an EOS token the byte tokenizer appended into every inference prompt; V55 raised first-byte accuracy 3.7\% $\to$ 97.1\% in phase A before phase B eroded it to 13.1\%). With both fixes applied, V57 retrained all seven architectures from scratch (freeze 0.50, rank 16, KL 0.05, lr 1e-3, 100 epochs): single-stream byte AR dominated --- V52 ReMixer 88/100 EM (94.0\% FT, 93.0\% P3, 0.962 WO), V46-3 84/100 EM, every multi-stream and flow architecture 0/100 EM --- and the paraphrase test was devastating (V52 0/90, V46-3 1/90 variant exact-match). Memorization at this scale is byte-level pattern matching, not semantics; the 988 held-out paraphrase metric must be read against this finding. The full per-version trajectories (V46-V57 parameter sweeps, V50 content-word-overlap 2.2\%, V51 categorical-vs-identity recall, V56 phase ordering) are in \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V46_README.md}{V46\_README.md} through \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V57_README.md}{V57\_README.md}.
+
+\subsection{V72: the freeze-fraction sweep}
+
+The V72-GLU backbone reached EM 185 (18.7\%) on full-988 held-out with SwiGLU channel-mix [Shazeer, 2020] and 3-epoch Discord pretraining (validation perplexity 3.16). The canonical FMSP freeze fraction was 0.50, inherited from the weak-backbone era. A 2026-07-19 freeze-fraction sweep produced the decisive gain: at \textbf{freeze 0.05} the same backbone reached \textbf{EM 486 $\pm$ 31 (480 / 520 / 458)}, a 3.3$\times$ increase over V67 and 2.6$\times$ the 0.50 protocol (echo 26\% $\to$ 73\%, hijack 63\% $\to$ 25\%). All FMSP variants at this stage still QA-ified Discord chatter (later measured on V76 as Discord perplexity 51 to 64 against a 3.31 backbone baseline). The deeper problem was backbone-level, not freeze-level.
+
+\subsection{V75 to V76: backbone-level fixes}
+
+V75 added zero-parameter RoPE on the convolution value pathway (RPC pattern; chatter distinct-2 0.798 $\to$ 0.863). V76 (993{,}254 parameters) extended the rotation to both value and gate (RPG pattern; chatter distinct-2 0.872, validation perplexity 3.18, full-988 EM 457 $\pm$ 32, passing the project's $\geq$ 455 bar). V76-RPG became the recommended backbone. But the FMSP-regime collapse persisted: pre-V77 FMSP still drove Discord perplexity to 47 to 64 (spanning the C1 stage at 47.8 to 50.8 and V76-f05 at 51 to 64, 3 seeds) and OOD hijack to $\sim$77\%.
+
+\subsection{V77: the three staged fixes that produced P05}
+
+V77 (2026-07-22) attacked the collapse at the objective level in three staged components.
+
+\textbf{Stage 0: baselines and two decisive measurements.} First, the weight-decay freeze leak was confirmed (full mechanism and measurement in \S3.3: AdamW's decoupled weight decay shrank all 49{,}663 supposedly frozen scalars uniformly 4.69\% per run; the restore-after-step fix brings this to 0.00\%). Second, the zero-adapter ablation on the V76-f05 checkpoint (s44 best single seed: echo 87\%, hijack 10\%): removing the 4k rank-16 adapter at inference made question-relevance hijack worse (10\% to 41\%) and echo collapse (87\% to 7\%). \textbf{The adapter is the question-recognition mechanism; hijack content lives in the 943k drifted backbone scalars.} The planned adapter gating was cancelled: gating the adapter would amplify hijack.
+
+\textbf{Stage 1: C2, true freeze (restore-after-step).} After every \texttt{optimizer.step()}, frozen scalars are restored bit-exactly from a pre-FMSP snapshot (PyTorch parameter groups are per-tensor and cannot express per-scalar weight decay; restore-after-step is optimizer-agnostic). Post-fix verification: frozen change is 0.00\% (100\% exact-zero deltas). Result: behaviorally neutral on every axis (EM 422.3, Discord perplexity $\sim$54, hijack 17.3\%, fabrication 15.3/18, chatter QA-ified, all approximately V76-f05 within noise). The mechanical bug was real but not the behavioral cause: the collapse lives in the gradient drift of the 95\% trainable scalars. C2 is kept as a correctness fix at zero cost.
+
+\textbf{Stage 2: C1, answer-only CE (the memorization unlock).} The V71+ forward computes cross-entropy over all non-pad positions, including question bytes, so 988 answers $\times$ 9 paraphrases $\times$ 10 epochs taught the QA format as an unconditional memorized-answer trigger. C1 computes cross-entropy on answer-region target positions only (\texttt{loss\_mask[t] = a\_mask[t+1]}). Result: the largest single-component gain in the project's history. EM 581.3 mean (+124 over V76-f05, +159 over C2, new record), echo 93.7\%, hijack 5.7\% (passing bar), QA-regurgitation on chatter prompts gone (in-register conversational gibberish is success by the project's own bar). Remaining gaps: Discord perplexity $\sim$49, fabrication 16.0/18, OOD hijack $\sim$65\%.
+
+\textbf{Stage 3: probe-KL, off-distribution conservation (the preservation unlock).} Per fine-tuning step, one cyclic probe batch is loaded (1{,}200 Discord-Dialogues anchors, 800 unseen small-qa-en-1k questions with the 100 evaluation questions excluded by normalized-string match, 60 fixed OOD prompts from \texttt{ood\_trainprobe\_v77.txt}). KL to the frozen backbone over all non-pad positions; constant $\lambda_2$, no ramp. \textbf{Not replay: no cross-entropy on probes, zero capacity spent learning probe content.} Result: language preservation restored to backbone level. Discord perplexity 3.68 at $\lambda_2$ = 0.5 (3.58 at 1.0, saturated; backbone 3.31), OOD hijack $\sim$77\% to 17.5\% (9\% at $\lambda_2$ = 1.0), chatter backbone-level (distinct-2 0.90 to 0.91, 21 to 24 words). Cost: EM 581 to 544 (P05) or 523 (P10), still far above the 455 bar; P05 beats the old V76-f05's 457 by +87 while preserving language for the first time.
+
+\textbf{Stage 5 (Stage 4 was reserved for the abstention arm, later executed as V79; the numbering matches \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V77_README.md}{V77\_README.md}): V77-M margin-loss escalation --- tried, failed, mechanism learned.} Fabrication stayed 15 to 17/18 in every arm, hitting the pre-registered escalation trigger. Measurement first: the backbone's answer-start entropy is 3.59 nats on unseen 1k questions and 3.55 on the 18 unanswerable, so the margin target (H $\geq$ 3.59 on probe answer-starts) was set from data. Outcome: the margin was dormant (mgl $\approx$ 0.0003, constraint already satisfied), yet a tiny epoch-0 perturbation chaos-amplified both seeds into terrible basins; subsample EM 18/12 (vs 56/59), question-relevance hijack 56\%, fabrication unchanged. \textbf{Arm rejected.} Training curves were identical to P05 but final weights were 14.6\% L2 apart. Fabrication is not a confidence problem; it is an entity-recognition boundary problem: ``Who painted the Mona Lisa?'' and ``Who painted the Glimmering Frostberry?'' are form-identical, so QA mode fires on both. The only remaining lever is data-level.
+
+The V77 recipe-stage table is reported verbatim.
+
+\textbf{V77 recipe-stage table (V76-RPG backbone, freeze 0.05, 3 seeds)}
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{V77 recipe-stage table on the V76-RPG backbone (freeze 0.05, 3 seeds).}
+\label{tab:v77-recipe}
+\begin{tabular}{p{2.4cm}>{\raggedleft\arraybackslash}p{1.5cm}>{\raggedleft\arraybackslash}p{1.5cm}>{\raggedleft\arraybackslash}p{1.5cm}>{\raggedleft\arraybackslash}p{1.7cm}>{\raggedleft\arraybackslash}p{1.5cm}>{\raggedleft\arraybackslash}p{1.2cm}>{\raggedleft\arraybackslash}p{1.9cm}}
+\toprule
+arm & EM/988 ($\geq$455) & echo\% ($\geq$50) & hijack\% ($\leq$10) & OOD hj\% (59q) & Discord PPL & fabric./18 & chatter d2 / words \\
+\midrule
+V76-f05 (old canonical, 3-seed mean) & 457.0 $\pm$ 32 & 75.7 & 17.0 & $\sim$77 & 51 to 64 & 16.3 & 1.0 sat / 14 \\
+V77-C2 (true freeze only) & 422.3 & 75.3 & 17.3 & $\sim$75 & 52.8 to 55.9 & 15.3 & 1.0 sat / 14 \\
+V77-C1 (+answer-only CE) & \textbf{581.3} & 93.7 & \textbf{5.7} & $\sim$65 & 47.8 to 50.8 & 16.0 & 0.99 sat / 20 \\
+\textbf{V77-P05 (+probe-KL 0.5)} & \textbf{544.3} (3-seed mean) & \textbf{91.3} & \textbf{7.3} & \textbf{17.5} (3-seed mean) & \textbf{3.68} & 16.7 & \textbf{0.91 / 21} \\
+V77-P10 (+probe-KL 1.0) & 523.3 & 83.3 & 12.3 \faExclamationTriangle & $\sim$9 & 3.58 & 14.7 & 0.90 / 24 \\
+V77-M05 (+margin 0.5) & \textbf{REJECTED} & 33.5 & 56.0 & n/a & n/a & 16.5 & n/a \\
+V76 backbone (no FMSP) & n/a & 2.0 & 0.0 & 0 & 3.31 & 0 & 0.872 / 25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Footnote: ``1.0 sat'' in the chatter d2 column means the distinct-2 metric saturated at its 1.0 ceiling, a degenerate regime in which the model QA-regurgitates memorized training chatter (every emitted byte type is sampled), so the metric loses discriminative power; a saturated reading indicates failure, not success.
+
+\textbf{V76-f05 echo/hijack --- two aggregations.} The V76-f05 row above (echo 75.7\%, hijack 17.0\%) is the 3-seed mean. The s44 best single seed reads echo 87.0\% / hijack 10.0\% (source: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V76_README.md}{V76\_README.md}); seed variance is large (s42 sits at 29\% hijack), so the two aggregations differ substantially. \S4.4 Stage 0 and \S6.2 cite the s44 best-seed values (echo 87\% / hijack 10\%) because the zero-adapter ablation was run on the s44 checkpoint; the table row above reports the 3-seed mean for cross-row comparability.
+
+\textbf{P05 OOD-hijack provenance.} The P05 OOD-hijack value appears in three places in this paper: 17.5\% (3-seed mean of the per-seed values 25.4/18.6/8.5 on the 59-prompt \texttt{ood\_eval\_v77.txt} battery, this table and \S6.1(iii)), 25.4\% (the s42 component of that same measurement, cited as the reference value in the \S6.3 V78 table), and $\sim$17.5\% (the same 3-seed mean, cited as the reference arm of the \S4.6 V79 table). These are not contradictory: the 3-seed mean of 17.5\% is the headline P05 number and the 25.4\% is its s42 component, labeled with its context at each occurrence.
+
+P05 per-seed EM: 540 / 557 / 536. The registered recipe line is \texttt{true\_freeze=True, answer\_only\_ce=True, probe\_kl\_weight=0.5} (P05) or \texttt{1.0} (P10); otherwise canonical (freeze 0.05, adapter rank 16, KL 0.05, learning rate 1e-3, 10 epochs, 9k/988 split). P05 is the primary recipe; P10 is documented as the stronger-conservation variant (lower OOD hijack 9\% but slightly worse question-relevance hijack 12.3\%, breaching the 10\% guard).
+
+\subsection{V78: parameter partitioning, falsified}
+
+V78 tested the hypothesis that assigning memorized-QA behavior and general-response behavior to physically separate parameter regions (a hybrid memorization zone M of remixer sidecar plus adapter plus Fisher bottom band, with everything else bit-exact frozen) would improve over P05. Result: the partition hypothesis was falsified at every zone size. Full-988 EM collapses 544 $\to$ 425 $\to$ 244 $\to$ 2 $\to$ 0 as the trainable set shrinks from $\sim$947k to $\sim$700k to $\sim$501k to $\sim$302k to $\sim$39k, while question-relevance hijack gets \textbf{worse} (9\% to 67\%) and OOD hijack also gets worse (16.9\% to 54.2\%); Discord perplexity does not improve (3.67 to 3.84). H95 (the P05 control) reproduces P05 within noise on every axis, validating the procedure. \textbf{The kill condition was met; Stage 2 was cancelled per plan.}
+
+The zone-ablation diagnostics on H95 nonetheless mapped the mechanism. Question recognition lives in the adapter (zero-adapter ablation: echo 91 to 10, hijack 9 to 37). Memorized-answer content lives in the Fisher band (structural-only ablation: echo 0\%). The remixer sidecar is not a separable module: removing it from the trained model damages language itself (Discord perplexity 3.70 to 5.15). Parameter partitioning of this zoning family at the sub-1M scale is falsified: within the zone configurations tested, memorization and hijack are the same circuit.
+
+\subsection{V79: abstention by backbone self-distillation}
+
+V79 (2026-07-23) attacked fabrication at the data level under a hard project constraint: a fixed refusal string is forbidden (memorizing one refusal string would just add one more memorized answer to FMSP). The unanswerable questions (2{,}425 examples, fabricated-entity 85\% / absurd 8\% / unknowable 6\%, $\sim$5 paraphrases per group) are answered by the V76-RPG backbone itself at temperature 0.9, filtered to evasive-only by the evaluation classifier (no memorized entity, no assert-verb-plus-year, no invented capitalized entity, $\geq$3 words, distinct-2 $\geq$ 0.5), with all answers unique. The file is mixed into FMSP training at X\% dose; the 988-pair held-out validation set is untouched. The 2{,}425 training questions are group-disjoint from the 18 evaluation probes: the generator (\texttt{gen\_v79\_abstention.py}) draws its fabricated entities from its own ADJ$\times$NOUN/PLACE pools and explicitly forbids the 18 eval entities (``glimmering frostberry'', ``symphony of hollow dawn'', etc.) and the 18 eval question strings, so no shared fabricated-entity/absurd/unknowable group can leak a paraphrase from train into eval.
+
+\textbf{Result: fabrication halved (16.7 to 8.3/18) with EM dose-invariant (534.7 to 549 across A01 to A25, within P05 seed noise; A20 at 534.7, bar $\geq$ 455).} This 16.7-to-8.3 reduction is an upper bound on the true effect: the evasive-answer filter that selected the abstention training data (no memorized entity, no assert-verb-plus-year, no invented capitalized entity, $\geq$3 words, distinct-2 $\geq$ 0.5, above) and the fabrication scorer on the 18 unanswerable probes are the same classifier family, so the training data was selected to pass the test that scores it and the measurement is partly circular. An independently-scored human or orthogonal-classifier evaluation is future work. The EM dose-invariance finding (below) is unaffected by this confound, because it concerns memorization, not fabrication scoring. A further caveat on what the learned behavior actually is: the distillation teacher (the V76-RPG backbone itself) scores 0/6 on the real-knowledge CONTROLS (Mona Lisa, Mozart, Pacific Ocean, etc.; the V79 table backbone row above) --- it answers nothing --- so the evasive style it produces and that V79 learns may be evasion style rather than calibrated honesty (the model learns ``produce evasive-looking text on unknown-entity questions'' rather than ``know what you don't know''). The circularity and upper-bound caveats above still apply. The dose-response:
+
+\textbf{V79 abstention dose-response (P05 plus abstention, 3 seeds unless noted)}
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{V79 abstention dose-response (P05 plus abstention, 3 seeds unless noted).}
+\label{tab:v79-dose}
+\begin{tabular}{p{2.6cm}>{\raggedleft\arraybackslash}p{1.6cm}>{\raggedleft\arraybackslash}p{1.6cm}>{\raggedleft\arraybackslash}p{1.7cm}>{\raggedleft\arraybackslash}p{2.2cm}>{\raggedleft\arraybackslash}p{1.5cm}>{\raggedleft\arraybackslash}p{1.3cm}>{\raggedleft\arraybackslash}p{1.6cm}}
+\toprule
+arm & fabricate/18 & EM (988) & Discord PPL & qrel echo/hj\% & OOD hj\% & controls & unique gens \\
+\midrule
+\textbf{V79-A20 (near-balance point)} & \textbf{8.3} (7/8/10) & 534.7 (536/536/532) & 3.69 & 84.7 / 10.7 \faExclamationTriangle edge & 12.4 (10.2/16.9/10.2) & 5/6 & 17 to 18/18 \\
+V79-A25 (OOD champion) & \textbf{8.3} (8/9/8) & 535.7 (545/519/543) & 3.69 & 83.3 / \textbf{13.3} \faExclamationTriangle & \textbf{6.8} (6.8/6.8/6.8) & 5/6 & 17 to 18/18 \\
+V79-A05 & 10.7 (9/13/10) & 535.7 (539/529/539) & 3.68 & 84.0 / 13.7 \faExclamationTriangle & 13.6 (15.3/18.6/6.8) & 5/6 & 18/18 \\
+V79-A15 (s42 only) & 10 & n/a & n/a & 86 / 11 & 13.6 & 5/6 & 17/18 \\
+V79-A10 (s42 only) & 11 & 540 (s42) & 3.69 & 89 / 10 & 20.3 & 5/6 & 17/18 \\
+V79-A01 (s42 only) & 17 & 549 & 3.67 & 89 / 8 & 15.3 & 5/6 & 18/18 \\
+V77-P05 (reference) & 16.7 & 544.3 (3-seed mean) & 3.68 & 89.7 / 7.3 & $\sim$17.5 (V79-table reference) & 5/6 & 17/18 \\
+V76-RPG backbone & 0 & n/a & 3.31 & 2 / 0 & 0.0 & 0/6 & 18/18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dose curve (A01 $\to$ A05 $\to$ A10 $\to$ A20 $\to$ A25): fabrication 17 to 10.7 to 11 to \textbf{8.3 to 8.3} (saturates at about 20\%); question-relevance hijack 8 to 13.7 to 10 to \textbf{10.7} to 13.3 (non-monotonic; A05 spikes, A20 is the local minimum at the saturation knee); OOD hijack 15.3 to 13.6 to 20.3 to 12.4 to \textbf{6.8} (A25 is the minimum). \textbf{A20 is the near-balance point}: fabrication at saturation with the smallest question-relevance cost (qrel hj 10.7\%, at the $\leq$ 10 guard edge; 2 of 3 A20 seeds sit at 10 to 11\%, just outside the $\leq$ 10 guard band). A25 is the OOD champion (6.8\% hijack, with 88.1\% OOD free). The OOD battery classifies each prompt as echo / hijack / free in a 3-way split (\S3.7): A25 reads echo 3, hijack 4, free 52 of 59, so 6.8\% hijack and 88.1\% free are consistent (the remaining 5.1\% is echo). EM is dose-invariant (534.7 to 549 across 1 to 25\%), consistent with the repetition theory.
+
+\subsection{V86: the architecture census}
+
+V86 (2026-07-27) re-ran every alignable mixer family under identical P05 with three seeds.
+
+\textbf{V86 census (all under identical P05, 3 seeds 42/43/44)}
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{V86 architecture census under identical P05, 3 seeds 42/43/44.}
+\label{tab:v86-census}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{p{3.0cm}llrrp{2.6cm}}
+\toprule
+family & version & backbone params & full-988 EM (3-seed) & chatter d2 & qrel/OOD hijack \\
+\midrule
+RPG-Mixer (champion) & V83-RPG & 996{,}873 & 563.7 (564/559/568) & \textbf{0.883} & \textbf{4.0\%} / 6.8\% \\
+RPG-Mixer $-$ ReMixer & V85-NoRemix-RPG & 961{,}775 & 568.3 (575/554/576) & 0.898 & 5.0\% / 32.2\% \ding{55} \\
+MLP-Mixer + ReMixer (learned labels) & V52-P05 & 976{,}398 & \textbf{560.7} (575/554/553) & 0.866 (1/9) & 18.0\% \ding{55} / 15.3\% \checkmark \\
+MLP-Mixer + ReMixer (paper-faithful) & V58-P05 & 962{,}055 & 455.0 (466/448/451) & 0.748 (4/9) \ding{55} & 22.0\% \ding{55} / \textbf{5.1\%} \checkmark \\
++ saliency & V59-P05 & 962{,}958 & 436.0 (430/441/437) & not measured & not measured \\
+Pure MLP-Mixer & V46-3-P05 & 961{,}152 & 431.3 (414/438/442) & not measured & not measured \\
+FSC-Mixer + sidecar & V80-TsR & 995{,}248 & 488 (s42 only) & 0.732 & 30.0\% \ding{55} / 60 to 80\% \ding{55} \\
+FSC-Mixer, pure & V86-TsR & 955{,}136 & 376.7 (371/363/396) & 0.774 & 34.0\% \ding{55} / 49.2\% \ding{55} \\
+S-FLM & V50 & 999{,}525 & not alignable & n/a & n/a \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+V83-RPG remains the only arm holding all four axes. V52-P05 is the strongest challenger (560.7 EM, inside the champion $\pm$32 band; fails only the question-relevance guard at 18.0\%), and V58-P05 holds the best-ever no-abstention OOD number (5.1\%) despite terrible chatter (0.748). The ``deviation'' that retired V52 in the old era (4/7 layers learned negative $\alpha$, judged unfaithful to OAMixer [Kang et al., 2022], a vision method whose exponential similarity mask the project's ReMixerLayer adapts to causal byte-level mixing) is the feature under P05: V52 beats its paper-faithful correction V58 by +106 EM (560.7 vs 455.0). The broader methodological finding --- under P05, four of five old-era families moved by hundreds of exact-match (V46-3 84/100-memo-era $\to$ 431.3 full-988; V58 87/100 $\to$ 455.0; V59 84/100 $\to$ 436.0; V52 88/100 $\to$ 560.7), so the long-standing ``routing ceilings'' were recipe artifacts, not architecture-level ceilings --- is developed in \S7.2.
+
+\section{Experiments}
+
+\textbf{What the exact-match numbers mean.} Exact-match on the 988 held-out questions measures reproduction of trained answer content for an unseen phrasing of a trained question --- verbatim retrieval, not semantic knowledge (see the abstract and \S4.1, where the V57 paraphrase test scored 0/90 and 1/90 variant exact-match). There is no contradiction: the 988 held-out questions are the held-out tenth paraphrase of the same 988 trained answers, with full answer overlap by construction (\S3.6), which is exactly what the repetition theory of \S7.1 predicts. No claim of semantic generalization is made; the capability axis under study is answer-content reproduction.
+
+This section reports the registered results of FMSP under the P05 recipe on the final V87 (CCD-Mixer) and V88 (vanilla transformer reference) chassis at six parameter budgets, plus the supporting V72 freeze sweep.
+
+\subsection{The V72 freeze sweep (motivation for the 5\% freeze fraction)}
+
+The V72-GLU backbone under three recipes:
+
+\begin{table}[!t]
+\centering\small
+\caption{The V72-GLU freeze-fraction sweep on the V72-GLU backbone.}
+\label{tab:v72-sweep}
+\begin{tabular}{lrrrl}
+\toprule
+configuration & EM (of 988) & echo\% & hijack\% & notes \\
+\midrule
+Freeze 0.50 (canonical) & 187.3 $\pm$ 2.1 (185/188/189) & 26 & 63 & binding constraint \\
+\textbf{Freeze 0.05} & \textbf{486 $\pm$ 31 (480/520/458)} & \textbf{73} & \textbf{25} & 3.3$\times$ V67, 2.6$\times$ the 0.50 protocol \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 5\% freeze fraction was adopted as the registered value based on this sweep. The base V72-GLU numbers (freeze 0.50, rank 16, KL 0.05, learning rate 1e-3, 10 epochs) are EM 185/988 (18.7\%), FT 50.9\%, P3 25.0\%, WO 0.326, FMSP validation loss 0.3122, pretrain perplexity 3.16; multi-seed EM 185/188/189 = 187.3 $\pm$ 2.1. Control comparisons: V67 EM 149/988 (15.1\%), V71-GLC3 173/988 (17.5\%). V71-GLC3 is the V71 gated-long-conv (GLC) backbone under the 3-epoch pretrain protocol (matching V67's standard); the V71 tournament winner itself (V71-GLC, 2-epoch pretrain) scored EM 170 --- the 3-point gap (170 vs 173) is attributable to the pretrain-epoch difference, not to a freeze-fraction or seed difference (same GLC token-mix k=129, 7 blocks, same FMSP recipe; source: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V71_README.md}{V71\_README.md}, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V72_README.md}{V72\_README.md}).
+
+\subsection{The six-size V87/V88 scaling study}
+
+A note on the architecture lineage, because the V87/V88 study is the empirical payoff of an explicit three-step sequence and that sequence is not obvious from the version tags alone. The P05 recipe was developed on the V76-RPG backbone (\S4.4); that recipe is the one carried into the scaling study below, unchanged. The V86 architecture census then re-ran every alignable mixer family under identical P05 with three seeds and crowned V83-RPG as the only arm holding all four registered axes. The V87 final chassis IS the V83-RPG architecture frozen verbatim (the V87-1M row reproduces the V83-RPG census champion to the last digit on every axis), and V88 is a vanilla decoder-only transformer registered at the same six budgets as the registered attention-based control.
+
+The V87 final chassis (CCD-Mixer) and V88 reference (vanilla transformer) are trained under byte-identical recipes at six parameter budgets (1M, 500K, 300K, 100K, 50K, 10K) with three FMSP seeds each. The headline is the full-988 exact-match memorization:
+
+\begin{table}[!t]
+\centering\small
+\caption{Headline full-988 exact-match memorization across the V87/V88 scaling study (V87 = CCD-Mixer, V88 = vanilla transformer reference; 1M row reports 3-seed mean and per-seed values).}
+\label{tab:scaling-em}
+\begin{tabular}{lll}
+\toprule
+Size & V87 (CCD-Mixer) full-988 EM & V88 (transformer) full-988 EM \\
+\midrule
+1M & \textbf{563.7} (564/559/568) & \textbf{653.3} \\
+500K & \textbf{279.3} & \textbf{396.7} \\
+300K & \textbf{56.3} & \textbf{42.0} \\
+100K & 0 & 0 \\
+50K & 0 & 0 \\
+10K & 0 & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two empirical regularities are visible across both architectures. First, the 500K to 300K memorization cliff: EM drops from 279.3 to 56.3 on the mixer (a 5x decrease) and from 396.7 to 42.0 on the transformer (a 9.4$\times$ decrease) for a 1.7x decrease in parameter count. Second, the hard EM=0 floor at or below 100K parameters: both architectures produce zero exact-match on the 988-pair held-out battery at 100K, 50K, and 10K.
+
+The other axes show the boundary discipline results:
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{V87/V88 boundary discipline axes across the six parameter budgets.}
+\label{tab:scaling-boundary}
+\begin{tabular}{lllrrrr}
+\toprule
+Size & Arch & Params & Chatter distinct-2 & qrel echo/hj\% & OOD hijack & Discord PPL \\
+\midrule
+1M & V87 (Mixer) & 996{,}873 & \textbf{0.883} & \textbf{95.0 / 4.0} & \textbf{6.8\%} & 3.66 \\
+1M & V88 (Transformer) & 996{,}736 & 0.838 & 94.0 / 5.0 & 8.5\% & \textbf{3.52} \\
+500K & V87 & 491{,}742 & \textbf{0.912} & 37.0 / 49.0 & 35.6\% & 4.00 \\
+500K & V88 & 498{,}528 & 0.738 & \textbf{73.0 / 16.0} & 11.9\% & 3.98 \\
+300K & V87 & 292{,}525 & 0.810 & 11.0 / 60.0 & 25.4\% & 4.47 \\
+300K & V88 & 297{,}680 & \textbf{0.840} & \textbf{24.0 / 54.0} & \textbf{18.6\%} & 4.47 \\
+100K & V87 & 95{,}084 & 0.546 & 4.0 / 54.0 & \textbf{27.1\%} & 4.98 \\
+100K & V88 & 97{,}872 & \textbf{0.582} & 8.0 / 74.0 & 67.8\% & \textbf{4.92} \\
+50K & V87 & 48{,}684 & \textbf{0.667} & 2.0 / 31.0 & 6.8\% & \textbf{5.19} \\
+50K & V88 & 49{,}888 & 0.553 & 4.0 / 38.0 & 23.7\% & 5.28 \\
+10K & V87 & 9{,}666 & 0.359 & 0.0 / 0.0 & 0.0\% & \textbf{6.70} \\
+10K & V88 & 9{,}808 & \textbf{0.463} & 0.0 / 0.0 & 0.0\% & 6.79 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The full per-axis master tables for both architectures are registered in Part 1 of this series [Lee, Part 1 of this series, companion paper]; this paper reports the memorization axis in full and the boundary axes in summary.
+
+At 1M, the V87 mixer holds the boundary-discipline advantage on question-relevance (95.0/4.0 vs 94.0/5.0) and on OOD (6.8\% vs 8.5\%) while the V88 transformer holds the raw language-modeling advantage on Discord perplexity (3.52 vs 3.66) and raw memorization (653.3 vs 563.7). At 500K, the V88 transformer wins memorization by a larger margin (396.7 vs 279.3) and question-relevance hijack (16.0\% vs 49.0\%); the V87 mixer sets the discord-register family record on chatter distinct-2 (0.912; Part 3's 0.960 on SmolTalk2 is the project-wide record). At 100K and below, the boundary axes are degenerate (the model does not engage the question at all).
+
+The OOD numbers must be read with caution. The legacy OOD numbers in the table are single-seed (seed 42), measured on a discord-register-matched battery, and collapse-blind: a periodic-orbit loop matches no memorized answer, so the detector scores it as free. The contrast between the registered and post-registration protocols is large enough to invert the 500K ordering:
+
+\begin{table}[!t]
+\centering\small
+\caption{Legacy vs collapse-inclusive OOD hijack at 500K and 1M (V87, V88).}
+\label{tab:ood-rescore}
+\begin{tabular}{lrrrr}
+\toprule
+Measurement & V87-500K & V88-500K & V87-1M & V88-1M \\
+\midrule
+Legacy single-seed (s42) & 35.6\% & 11.9\% & 6.8\% & 8.5\% \\
+3-seed collapse-inclusive rescored (post-registration) & 39.0\% & 58.7\% & 39.0\% & 57.6\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Under 3-seed, collapse-inclusive rescoring (the project's \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{OOD\_\allowbreak COLLAPSE\_\allowbreak RESCORE\_\allowbreak ANALYSIS.md}), the 500K ordering inverts: V87 reads 39.0\% versus V88's 58.7\%; at 1M, V87 reads 39.0\% versus V88's 57.6\%. The 500K V88 OOD advantage was a collapse-detection artifact whose correction exceeds the measured gap by a factor of about 2.1 (a 37.8pp swing on an 18.1pp measured gap --- the 18.1pp gap is the 3-seed legacy-mean gap, V87 35.0\% vs V88 16.9\%; the adjacent table shows the s42 values, 23.7pp, for reference), with V88-500K looping on about 44\% of casual OOD prompts while V87-500K almost never loops (2.3 of 59). The single-seed 6.8\%/8.5\% near-parity at 1M was the lucky corner of a noisy, collapse-confounded metric. \textbf{OOD for this project must be reported as a (register-pair $\times$ collapse-inclusive) property, not a single number.}
+
+\textbf{OOD reading guide.} Nine distinct FMSP OOD-hijack values appear in this paper across two backbones (V76-RPG, the P05 development chassis; V87/V88-1M, the scaling-study chassis), two scoring protocols (legacy collapse-blind; collapse-inclusive rescore), and two seed aggregations (s42; 3-seed mean). The table below maps each value to its basis so a reader can resolve ``which percent is which'' without retracing the per-occurrence provenance notes:
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{OOD-hijack reading guide across eight registered values.}
+\label{tab:ood-guide}
+\begin{tabular}{lllll}
+\toprule
+OOD hijack value & Backbone & Protocol & Seed & First appearance \\
+\midrule
+17.5\% & V76-RPG (P05) & legacy & 3-seed mean & \S4.4 V77 table, \S4.6 V79 table, \S6.1(iii) \\
+25.4\% & V76-RPG (P05) & legacy & s42 (V78-table ref) & \S6.3 V78 table \\
+6.8\% & V87-1M & legacy & s42 & \S5.2 table above, \S6.5 \\
+8.5\% & V88-1M & legacy & s42 & \S5.2 table above, \S6.5 \\
+35.6\% & V87-1M & collapse-inclusive & s42 & \S6.5 gap table \\
+39.0\% & V87-1M & collapse-inclusive & 3-seed mean & \S5.2 rescore row above, \S6.5 \\
+52.5\% & V88-1M & collapse-inclusive & s42 & \S6.5 gap table \\
+57.6\% & V88-1M & collapse-inclusive & 3-seed mean & \S5.2 rescore row above, \S6.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Analysis and Negative Results}
+
+This section reports the mechanism map and the three negative results that closed three future research directions. \S6.1 is a synthesis of why each P05 component is load-bearing; \S6.2 to \S6.5 report the individual mechanism and negative-result analyses.
+
+\subsection{Why P05 Works: a mechanism synthesis}
+
+P05 is a registered recipe with four named components: 5\% Fisher-guided freeze, true freeze, answer-only CE, and probe-KL at weight 0.5. Each component is load-bearing for a specific mechanism reason grounded in the project's measurements.
+
+\textbf{(i) True freeze.} AdamW's decoupled weight decay shrinks ``frozen'' scalars regardless of gradient --- the project measured a 4.69\% uniform shrink of 49{,}663 supposedly frozen scalars, matching the WSD-aware theory of 4.65\% (full mechanism, measurement, and restore-after-step fix in \S3.3). Without true freeze, the freeze guarantee is silently violated and the 5\% Fisher band drifts; with restore-after-step, the frozen-region change is exactly 0.00\%. True freeze is a correctness precondition for the other three components: any measurement of the Fisher band, the adapter, or probe-KL is contaminated if the freeze leaks.
+
+\textbf{(ii) Answer-only CE.} Full-sequence CE computes cross-entropy over all non-pad positions, including question bytes. Under 988 answers times 9 paraphrases times 10 epochs, the question bytes see gradient on every byte of every paraphrase; the QA format becomes an unconditional memorized trigger. C1 (answer-only CE) zeros gradient on question bytes, leaving only the answer-to-question mapping under repetition. The measured effect is the largest single-component gain in the project's history: EM 581.3 mean (+124 over V76-f05's 457.0, +159 over C2). The mechanism is frequency-bearing: at sub-1M parameters, restricting cross-entropy to the answer region is the load-bearing intervention, larger than any architecture choice around it.
+
+\textbf{(iii) Probe-KL.} Probe-KL anchors the fine-tuned distribution on probe data (1{,}200 register anchors plus 800 unseen QA questions plus 60 fixed OOD prompts) against the frozen backbone, with zero cross-entropy on the probe set. No capacity is spent learning probe content; the term is conservation, not replay. The measured effect is language restoration: Discord perplexity drops from 47 to 64 (spanning the C1 and V76-f05 pre-P05 regimes) under prior FMSP regimes to 3.68 at $\lambda_2$ = 0.5 (3.58 at 1.0, saturated; backbone 3.31), and OOD hijack from about 77\% to about 17.5\% (9\% at $\lambda_2$ = 1.0). Cost: EM 581 to 544 (P05) or 523 (P10), still well above the 455 bar.
+
+\textbf{(iv) 5\% Fisher-guided freeze.} The memorized-answer content lives in the high-Fisher band of the 95\% trainable scalars, while the adapter at the final norm carries question recognition (zero-adapter ablation: echo 91 to 10, hijack 9 to 37; structural-only ablation: echo 0\%). The V78 zoning sweep falsifies the partitioning hypothesis: as the trainable set shrinks from about 947k to 39k, full-988 EM collapses 544 to 425 to 244 to 2 to 0 while question-relevance hijack gets worse (9\% to 67\%) and OOD hijack also gets worse (16.9\% to 54.2\%). Within the zoning configurations tested at this scale, memorization and boundary hijack cannot be separated by parameter partitioning --- you cannot freeze one and train the other by partitioning parameters. The 5\% Fisher band is the registered choice --- established by a two-point freeze sweep \{0.50, 0.05\} on V72-GLU (\S4.2, \S5.1) and corroborated on the trainable-budget side by the V78 zoning sweep --- not a measured optimum: no sub-5\% uniform freeze was ever tested, and \S6.5's full-FT control (0\% freeze) preserves Discord perplexity equally (3.65/3.51 vs 3.66/3.52), so the ``preserving enough backbone for language'' sub-claim cannot be load-bearing at this scale.
+
+\subsection{Zero-adapter ablation: adapter equals question recognition}
+
+The zero-adapter ablation was run twice, on two different checkpoints, and is therefore two different ablations rather than a numeric replication. The first measurement is at V77 Stage 0 on the V76-f05 (old canonical) s44 checkpoint (best single seed: echo 87\%, hijack 10\%; see \S4.4 Stage 0 and the V76-f05 dual-values note), where removing the 4{,}096-parameter adapter at inference and restoring backbone weights for the masked scalars produces a model where question-relevance echo collapses from 87\% to 7\% and hijack rises from 10\% to 41\%. The second is the P05-era zone ablation on V78-H95 (\S6.3): echo drops from 91 to 10, hijack rises from 9 to 37. The two checkpoints differ (V76-f05 is the old-recipe baseline; V78-H95 is the P05-equivalent zoning control), so the magnitudes differ with the checkpoint. The qualitative direction agrees in both: the adapter is the question-recognition mechanism, and the 943k drifted backbone scalars carry the memorized-answer content that the adapter decides when to use. \textbf{The adapter is never to be gated.} The original V77 plan included a question-recognition gate on the adapter; this was cancelled before implementation once the zero-adapter ablation was measured. This recognition map is established within the frozen-backbone FMSP regime; \S6.5 point 4 scopes it --- under a trainable backbone (the full-FT control, which has no adapter) recognition is learned in the backbone itself (qrel echo 96/94), so the adapter owns question recognition only when the backbone is frozen.
+
+\subsection{V78 zoning falsification: memorization and hijack are the same circuit}
+
+The V78 zoning experiment (see \S4.5 for the full narrative) ran a sweep of trainable-set sizes from 947k (H95, the P05-equivalent control) to 39k (SC, structural only). The EM-versus-separation tradeoff curve is monotonically dominated:
+
+\begin{table}[!t]
+\centering\small
+\caption{V78 zoning falsification: the EM-versus-separation tradeoff curve (H95 $\to$ SC).}
+\label{tab:v78-zoning}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr>{\raggedleft\arraybackslash}p{3.0cm}r}
+\toprule
+arm & trainable & EM (988) & Discord PPL & qrel echo/hj\% & OOD hj\% (59p) & OOD meanWO \\
+\midrule
+V78-H95 & $\sim$947k & \textbf{544} & 3.67 & 91/9 & 16.9 & 0.168 \\
+V78-H70 & $\sim$700k & 425 & 3.73 & 70/24 & 32.2 & 0.169 \\
+V78-H50 & $\sim$501k & 244 & 3.83 & 35/46 & 32.2 & 0.162 \\
+V78-H30 & $\sim$302k & 2 & 3.84 & 6/67 & 54.2 & 0.165 \\
+V78-SC & $\sim$39k & 0 & 3.35 & 2/11 & 1.7 & 0.180 \\
+V77-P05 (reference) & $\sim$947k & 540 (s42) & 3.67 & 89/10 & 25.4 (s42, V78-table reference) & 0.172 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+As the trainable zone shrinks, exact-match collapses monotonically (544 to 0), question-relevance hijack gets worse (9\% to 67\%, until SC fails to memorize at all), and OOD hijack also gets worse (16.9\% to 54.2\%); Discord perplexity does not improve across the memorizing arms (3.67 to 3.84; SC at 3.35 trivially improves because it fails to memorize at all). \textbf{Parameter partitioning of this zoning family at the sub-1M scale is falsified: within the zone configurations tested, memorization and hijack are the same circuit.} ``Half-memorization is the worst state'', EM 2 to 244 with FT 33\% to 51\% is maximal hijack.
+
+The zone-ablation diagnostics on H95 nonetheless mapped the mechanism:
+
+\begin{table}[!t]
+\centering\small
+\caption{Zone-ablation diagnostics on V78-H95 mapping the mechanism (adapter = recognition, Fisher band = content, remixer = language).}
+\label{tab:v78-ablation}
+\begin{tabular}{lrrrr}
+\toprule
+arm (H95) & Discord PPL & OOD hj/3 & qrel echo\% & qrel hj\% \\
+\midrule
+A-control (full model) & 3.70 & 2 & 91 & 9 \\
+B-no-adapter & 3.72 & 1 & \textbf{10} & 37 \\
+C-no-remixer (remixer to backbone) & \textbf{5.15} & 0 & 58 & 31 \\
+D-only-structural (band to backbone) & 3.66 & 0 & \textbf{0} & 11 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Adapter equals question recognition (B: echo 91 to 10, hijack 9 to 37). Fisher band equals content (D: echo 0\%, the structural zone produces no question engagement on its own). Remixer is load-bearing for language (C: removing it damages Discord perplexity 3.70 to 5.15, worse than control). The 3.7-versus-3.31 residual is carried almost entirely by the remixer-plus-adapter deltas, yet removing the remixer makes it worse, not better. The equilibrium is global; no scalar subset owns it.
+
+\subsection{V77-M05 margin loss: fabrication is not a confidence problem}
+
+The V77-M05 arm set an entropy floor at probe answer-start positions (\texttt{L\_margin = mean relu(H\_target $-$ H(p\_t))} with H\_target = 3.59, $\lambda_3$ = 0.5) to attack the fabrication axis at 16.0/18. The arm was rejected (see \S4.4). The margin was dormant from the start (mgl $\approx$ 0.0003, constraint already satisfied by the model), yet a tiny epoch-0 perturbation chaos-amplified both seeds into terrible basins: subsample EM 18/12 versus the P05 control's 56/59, question-relevance hijack 56\%, fabrication unchanged. Training curves were identical to P05, but final weights were 14.6\% L2 apart, a vivid demonstration of basin sensitivity in this regime. \textbf{Fabrication is not a confidence problem; it is an entity-recognition boundary problem}, and the only remaining lever is data-level (the V79 abstention extension).
+
+\subsection{FMSP versus LoRA, BitFit, and full-FT at this scale: a measured comparison}
+
+The \S3.8 comparison was originally structural. The controlled PEFT baselines have since been run on the registered 1M arms --- LoRA $r \in \{4,16\}$, BitFit (V87 only; V88 has no biases), and full fine-tuning --- each under the byte-identical P05 composite objective (answer-only CE + probe-KL 0.5 + KL\_qa 0.05), the same AdamW/schedule and 10-epoch protocol, and three seeds (42/43/44) for EM. LoRA hyperparameters: alpha = rank (scaling 1.0, the LoRA default), learning rate 1e-3 (P05-matched), applied to all block Linears (70 on V87, 30 on V88). The qrel echo/hijack boundary metrics and the Discord PPL column in the table below are seed-42; the OOD hijack column is seed-42 legacy collapse-blind but has since been rescoped under collapse-inclusive 3-seed rescoring (point 3 below, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md}). Logs are in \texttt{logs/peft/}. The measured comparison:
+
+\begin{table}[!t]
+\centering\footnotesize
+\caption{Controlled PEFT comparison on the V87 and V88 1M chassis (LoRA $r \in \{4,16,64\}$, BitFit, full-FT) under the P05 composite objective.}
+\label{tab:peft-comparison}
+\begin{tabular}{p{3.0cm}p{2.4cm}p{2.0cm}rrr}
+\toprule
+Arm (1M) & Trainable params & EM/988 mean (3 seeds) & Discord PPL & qrel echo/hijack \% & OOD hijack \% \\
+\midrule
+\textbf{V87 FMSP-P05 (registered)} & $\sim$951k (947k bb + 4{,}096 adapter) & \textbf{563.7} (564/559/568) & 3.66 & \textbf{95.0 / 4.0} & \textbf{6.8} \\
+V87 LoRA r=4 & 62{,}020 & 0.0 (0/0/0) & 3.78 & 10.0 / 57.0 & 18.6 \\
+V87 LoRA r=16 & 248{,}080 & 5.3 (9/4/3) & 4.08 & 10.0 / 71.0 & 42.4 \\
+V87 LoRA r=64 (s42) \dag{} & 992{,}320 (budget-matched) & 478 & 3.83 & 73.0 / 22.0 & 23.7 \\
+V87 BitFit & 7{,}931 (77 bias vectors) & 0.0 (0/0/0) & 3.44 & 3.0 / 1.0 & 3.4 \\
+V87 full-FT & 996{,}873 & \textbf{594.0} (600/597/585) & 3.65 & 96.0 / 2.0 & 16.9 \\
+\textbf{V88 FMSP-P05 (registered)} & $\sim$951k (947k bb + 4{,}096 adapter) & \textbf{653.3} (663/652/645) & 3.52 & \textbf{94.0 / 5.0} & \textbf{8.5} \\
+V88 LoRA r=4 & 45{,}440 & 0.0 (0/0/0) & 3.60 & 85.0 / 3.0 & 3.4 \\
+V88 LoRA r=16 & 181{,}760 & 25.3 (23/31/22) & 3.83 & 82.0 / 12.0 & 15.3 \\
+V88 LoRA r=64 (s42) \dag{} & 727{,}040 (under-budget) & 566 & 3.61 & 93.0 / 4.0 & 13.6 \\
+V88 full-FT & 996{,}736 & \textbf{663.0} (681/665/643) & 3.51 & 94.0 / 5.0 & 22.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\dag{} The r=64 arms are seed-42 only (5$\times$ training + 5$\times$ eval $\approx$ 3 GPU-hours on 2 GPUs; multi-seed would tighten the residual-gap estimate, not the pass/fail --- the effect sizes are 1-2 orders of magnitude outside the seed-noise band of the registered r=16 arms). V87 r=64 = 992{,}320 trainable (+4.3\% over FMSP's $\sim$951k = the clean budget-matched arm); V88 r=64 = 727{,}040 (V88 wraps fewer Linears, so r=64 is structurally 23.5\% under-budget --- yet it succeeds anyway, strengthening the budget-binding finding). The r=64 OOD values above are legacy collapse-blind; under collapse-inclusive rescoring they read V87 42.4\% / V88 50.8\% (point 1, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}).
+
+BitFit on V88 is structurally impossible (the V88 transformer has zero bias parameters), so the V88 BitFit row is omitted. LoRA was applied to all block Linears (70 on V87, 30 on V88). A collapse-inclusive caveat on two table rows that look like boundary champions: BitFit's V87 OOD of 3.4\% and V88-LoRA-r=4's OOD of 3.4\% are the lowest in the table, but both are collapse-blind artifacts --- under rescoring both invert (BitFit 3.4 $\to$ 32.8\%, LoRA r=4 V88 3.4 $\to$ 59.9\%, 3-seed collapse-inclusive; \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md}). Both arms under-fit the QA objective and default to the backbone's chatter fallback on OOD prompts --- the periodic-orbit loop the legacy detector cannot see --- so their low legacy numbers reward collapse evasion, not boundary discipline; the lower the fine-tuning capacity, the larger the rescore shift. The four-point reading of this table:
+
+\begin{enumerate}
+\item \textbf{LoRA's sub-1M ceiling is budget-bound first, rank-bound second; the registered LR was undertuned.} At the standard ranks \{4,16\} under the P05-matched learning rate (1e-3), LoRA fails sub-1M memorization (0 to 25.3 EM of 988) --- but at these ranks LoRA trains only 62k to 248k scalars (V87) / 45k to 182k (V88), i.e. 73 to 94\% below FMSP's $\sim$951k budget, so the failure is a budget failure, not a method failure. The LoRA points are consistent with the trainable-budget trend of the V78 zoning curve (\S6.3: EM collapses 544$\to$425$\to$244$\to$2$\to$0 as the trainable set shrinks $\sim$947k$\to$39k), though LoRA lands above, not on, the curve: V88 r=16 at 181k trainable reaches EM 25.3, well above the zoning curve's $\sim$302k point at EM 2, so low-rank adaptation recovers more per trainable scalar than the zone-ablation sweep predicted (the zone arms froze the backbone in place, while LoRA adds structured low-rank capacity on top of a frozen backbone). The decisive test is the budget-matched arm: \textbf{LoRA r=64 on V87 (992{,}320 trainable, +4.3\% over FMSP's $\sim$951k) reaches EM 478/988 (s42) --- 84.7\% of the FMSP reference (563.7) and 53$\times$ the failed r=16 arm} --- and on V88 (727{,}040 trainable, structurally under-budget at -23.5\%) reaches EM 566/988 --- 86.6\% of the FMSP reference (653.3) and 22$\times$ r=16. This is the success case the zoning curve predicted but had not exhibited: a LoRA arm at FMSP-comparable trainable count that memorizes at FMSP-comparable scale, confirming that the trainable budget --- not the parameterization family --- is the binding variable. The unconditional ``LoRA fails sub-1M memorization'' claim is retired in favor of ``LoRA's sub-1M ceiling is budget-bound first, rank-bound second.'' A residual $\sim$13 to 15\% EM gap to FMSP survives at equal trainable count (478 vs 563.7 on V87; 566 vs 653.3 on V88), and the boundary discipline is looser on the mixer (V87 r=64 qrel 73/22, OOD 23.7\% legacy / 42.4\% collapse-inclusive) though near-FMSP on the transformer (V88 r=64 qrel 93/4 $\approx$ FMSP, OOD 13.6\% legacy $\approx$ FMSP), so the low-rank subspace costs real memorization and anchoring precision even at matched parameter count. The registered learning rate (1e-3) was also undertuned for LoRA: at lr 3e-3 the r=16 arm lifts 7 to 8$\times$ (V87 9$\to$64, V88 23$\to$192), but the tuned ceiling (64/192) remains 3 to 9$\times$ below budget-matched r=64 (478/566) --- LR is a third-order correction, not the binding axis. BitFit (77 bias vectors, 7{,}931 trainable scalars, on V87) is inert: it never learns the QA task (0/0/0 EM), also consistent with the trainable-budget trend. The V88 LoRA echo--EM gap is diagnostic here: r=4 reaches qrel echo 85.0\% but EM 0.0\% (0/0/0), and r=16 reaches echo 82.0\% with EM 25.3\%. Echo (\S3.7) is question engagement --- the generation mentions at least one question content word --- a far weaker condition than byte-exact EM, so ``engages the question but never retrieves the memorized answer'' (echo 85\% / EM 0\%) is exactly the trainable-budget-below-threshold reading: LoRA r=4 has enough capacity to repeat question words but not enough to store the answer bytes. (Full sweep: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}; all five new arms are seed-42.)
+
+\item \textbf{The full-FT control must be reported squarely: with the P05 objective, full-FT (no freeze, no adapter) memorizes as well as or better than FMSP and preserves Discord perplexity equally.} Full-FT reaches 594.0 vs 563.7 EM on V87 and 663.0 vs 653.3 on V88, with Discord PPL 3.65/3.51 vs FMSP's 3.66/3.52. At 1M, the freeze-plus-adapter machinery is \textbf{not} load-bearing for memorization or for language preservation --- the composite objective (answer-only CE plus probe-KL plus KL\_qa) is.
+
+\item \textbf{The freeze-plus-adapter direction is an OOD-boundary claim, but its magnitude is architecture-dependent and much smaller under the corrected metric.} The table's OOD column (16.9 vs 6.8 on V87, 22.0 vs 8.5 on V88) is legacy seed-42 collapse-blind --- the same metric \S5.2 showed can move $\sim$6$\times$ under collapse-inclusive rescoring. That correction has now been run on the control arms: all 7 PEFT arms (FMSP, LoRA r=4, LoRA r=16, BitFit, full-FT) were regenerated for seeds 42/43/44 with per-prompt output capture (\texttt{eval\_ood\_peft\_samples.py}; legacy s42 values reproduce \texttt{eval-boundary-peft.log} to the digit), then rescored with \texttt{rescore\_ood\_collapse.py} (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md}). The collapse-inclusive gap between FMSP and full-FT:
+
+\begin{table}[!h]
+\centering\small
+\caption{Collapse-inclusive FMSP-vs-full-FT OOD-hijack gap on V87 and V88 1M.}
+\label{tab:peft-gap}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lp{6.2cm}rr>{\raggedleft\arraybackslash}p{2.8cm}}
+\toprule
+arch & measurement & FMSP hijack\% & full-FT hijack\% & gap (pp) \\
+\midrule
+V87 & s42 legacy (registered table above) & 6.8 & 16.9 & $-10.2$ \\
+V87 & 3-seed legacy mean & 18.1 & 16.4 & $+1.7$ \\
+V87 & s42 collapse-inclusive & 35.6 & 45.8 & $-10.2$ \\
+V87 & 3-seed collapse-inclusive mean (per-seed 35.6/32.2/49.2) & 39.0 & 40.7 & $-1.7$ (tied within seed noise) \\
+V88 & s42 legacy (registered table above) & 8.5 & 22.0 & $-13.6$ \\
+V88 & 3-seed legacy mean & 8.5 & 20.3 & $-11.8$ \\
+V88 & s42 collapse-inclusive & 52.5 & 61.0 & $-8.5$ \\
+V88 & 3-seed collapse-inclusive mean (per-seed 52.5/50.8/69.5) & 57.6 & 66.1 & $-8.5$ (robust) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+   The direction holds --- FMSP remains more boundary-disciplined than full-FT under rescoring. Corrected s42 gaps: V87 $-10.2$ (35.6 vs 45.8), V88 $-8.5$ (52.5 vs 61.0); note that the V88 s42 and 3-seed gaps coincide at $-8.5$. On 3-seed means the two architectures split: the V87 gap is within seed noise (FMSP and full-FT are statistically tied on OOD hijack at 1M), while the V88 gap holds robustly ($-8.5$ pp collapse-inclusive, all three seeds individually in the same direction). The ``roughly 2.5$\times$'' legacy framing is an artifact of the collapse-blind metric and must not be quoted without the legacy label. The inflation deltas are stated on a 3-seed-legacy-mean basis (the legacy 3-seed-mean rows above make them derivable): V87 FMSP +20.9 pp (18.1 $\to$ 39.0), V87 full-FT +24.3 pp (16.4 $\to$ 40.7); V88 FMSP +49.1 pp (8.5 $\to$ 57.6), V88 full-FT +45.8 pp (20.3 $\to$ 66.1). Within each architecture FMSP and full-FT inflate by comparable amounts, so the collapse-evasion failure mode is architecture-level, not fine-tuning-method-level, and the corrected gap is mostly surfacing the mixer-vs-transformer collapse asymmetry that \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md} already established for the FMSP arms --- not a fine-tuning-method effect. \textbf{Net: FMSP's OOD-boundary-discipline claim survives as a direction claim, strongest on the V88 transformer ($-8.5$ pp, 3-seed robust), tied on the V87 mixer at 3 seeds.} (Provenance note: the V87 FMSP s43 OOD samples file \texttt{logs/v87/eval\_ood\_v87-s43\_samples.txt} was found truncated at 0 bytes and was regenerated 2026-08-01; the 39.0\% 3-seed collapse-inclusive mean is verified from the per-seed values 35.6/32.2/49.2, arithmetic mean 39.0.)
+
+\item \textbf{The ``adapter is the question-recognition mechanism'' claim (\S6.2) must be scoped to the frozen-backbone regime.} The zero-adapter ablation established that map WITHIN the frozen-backbone FMSP regime (echo 91$\to$10, hijack 9$\to$37 on V78-H95). The full-FT control --- which has no adapter --- still reaches qrel echo 96/94, so with a trainable backbone the recognition function is learned in the backbone itself. The adapter owns question recognition only under the frozen-backbone constraint; the ablation result stands, its interpretation is regime-scoped.
+
+\item \textbf{Cost: FMSP is boundary discipline, not efficiency.} FMSP runs a second forward pass each step for the probe-KL term (the probe batch is disjoint from the QA batch), so its per-step forward cost is approximately 2$\times$ a single-forward recipe; freezing parameters saves neither compute nor memory (frozen scalars still occupy GPU memory and the forward graph still traverses them). Wall-clock from \texttt{logs/peft/}: V87-1M full-FT $\approx$ 228 s/epoch, V87-1M LoRA r=16 $\approx$ 277 s/epoch (LoRA's per-step overhead from the low-rank AB decomposition exceeds the savings from fewer trainable scalars), V88-1M full-FT $\approx$ 80 s/epoch (same training loop, fewer blocks). FMSP at V87-1M runs the same loop as full-FT plus the probe forward, so its wall-clock is above the 228 s/epoch full-FT baseline. The case for FMSP at this scale is boundary discipline, not compute or memory efficiency.
+\end{enumerate}
+
+\section{Discussion}
+
+\subsection{The repetition theory of FMSP memorization}
+
+The V79 abstention dose-response is dose-invariant in exact-match: 549, 535.7, 540, not measured, 534.7, 535.7 (across A01, A05, A10, A15, A20, A25) versus the P05 reference 544.3. The evasive answers are all unique, so they never repeat in training, so they consume no memorization capacity under FMSP. \textbf{FMSP memorizes by repetition.} This is consistent with the byte-level pattern-matching diagnosis from V57 (paraphrase test: V52 0/90, V46-3 1/90 variant exact-match) and with the answer-only CE finding (C1: gradient on question bytes is zero, so the only signal is the answer-to-question mapping under repetition). The repetition theory has three consequences: (1) abstention is capacity-free (confirmed by V79 dose-invariance), (2) the memorization-versus-paraphrase gap is intrinsic to the recipe, and (3) the saturation of fabrication at A20 = A25 = 8.3 is the saturation of ``what fraction of distinct evasive answers is enough for the model to learn the evasive mapping'' (about 20\%). The fabrication numbers inherit the scoring-circularity caveat of \S4.6 (filter $\approx$ scorer) and are therefore an upper bound; the EM dose-invariance finding is not circular.
+
+\subsection{Recipe as an architecture-level variable}
+
+The V86 census is the clearest evidence: V46-3 moves from 84/100-memo-era to 431.3 full-988 under P05; V58 from 87/100 to 455.0; V59 from 84/100 to 436.0; V52 from 88/100 to 560.7. Four of five old-era families moved by hundreds of exact-match under a single recipe change. The ``routing ceiling'' reported across five paradigms was a recipe artifact: the old canonical freeze 0.50, the leaky gradient-hook freeze, the full-sequence cross-entropy, and the lack of an off-distribution conservation term were each handicapping the recipe. P05 corrects all four.
+
+This reframes two methodological priors. First, recipe choices (freeze fraction, freeze mechanics, CE scope, KL anchoring) are not implementation details; they are architectural variables that can swing exact-match by hundreds of points at the same parameter count. Second, ``this architecture cannot memorize'' or ``this architecture cannot route'' are claims that must be made under a specific, audited recipe. The V86 census closes the architecture-search direction inside 1M (no architecture family beats the V83-RPG CCD-Mixer on all four axes), but the recipe direction is open.
+
+\subsection{When FMSP is the right tool}
+
+FMSP is the right tool when (1) the model has fewer than about 1M parameters and capacity is the binding constraint, (2) the fine-tuning task is question-answer memorization with held-out paraphrase evaluation, and (3) preserving the pretrained language distribution matters. FMSP is not the right tool when (a) the model has enough redundant capacity that LoRA's assumptions hold, (b) the fine-tuning task is continual learning over a task stream, or (c) the fine-tuning task has a strong natural abstention distribution already (P05's fabrication at 16.7/18 may be acceptable). Within sub-1M autoregressive byte-level fine-tuning, P05 is the registered recipe; A20 is the registered abstention extension when fabrication matters.
+
+\subsection{Scope}
+
+This is a small-scale study. The largest model has 996{,}873 parameters; the QA corpus is 10{,}000 pairs; the evaluation budget is 10 fine-tuning epochs per seed across three seeds. The findings are about what fine-tuning can recover at the sub-million-parameter scale, not about state-of-the-art language modeling or general PEFT. The OOD axis in particular is reported with explicit caveats.
+
+\section{Limitations}
+
+Ten limitations bound the scope of this paper.
+
+\textbf{Single-seed backbone.} The V76-RPG backbone (and the V87/V88 scaling-study chassis) is a single seed-42 pretrain; the three seeds 42/43/44 vary only the FMSP/adapter on that one backbone, so backbone-level metrics (Discord PPL, OOD hijack, chatter distinct-2) are n=1. The three-seed claims in this paper concern FMSP-level metrics (EM, qrel, fabrication), not backbone-level ones. Part 1 of this series now reports the discord-1M cell at three backbone (pretrain) seeds --- the discord-1M architecture gap replicates across backbone seeds [Lee, Part 1 of this series, companion paper] --- while every cell in the present paper remains backbone n=1.
+
+\textbf{Single-corpus probe set.} The probe set (\S3.5) is built from one pretraining stream (Discord-Dialogues) plus 800 unseen small-qa-en-1k questions plus 60 fixed OOD prompts. On a different pretraining corpus the Fisher window and probe anchors would need to be regenerated. The [Lee, Part 3 of this series, companion paper] dataset sweep (UltraChat [Ding et al., 2023], SmolTalk2, TinyStories) shows that the underlying memorization floor replicates across corpora, but the P05 PPL residual is corpus-dependent.
+
+\textbf{OOD numbers must be read as (register-pair $\times$ collapse-inclusive).} The legacy single-seed OOD battery is collapse-blind. A periodic-orbit loop matches no memorized answer, so the detector scores it as free, and V88-500K's ``OOD win'' was a collapse-detection artifact whose correction exceeds the measured gap by a factor of about 2.1 under 3-seed collapse-inclusive rescoring. All OOD numbers in this paper are reported with the caveat that the registered protocol is the discord-register-matched battery (register: the style of the training distribution, here casual discord conversation), and any cross-corpus OOD comparison should use the (register-pair $\times$ collapse-inclusive) protocol from the project's OOD analysis notes.
+
+\textbf{Sub-1M scale only.} FMSP was developed and validated on byte-level autoregressive MLP-Mixer backbones with fewer than 1M parameters. The freeze fraction (5\%), the adapter rank (16), and the probe-KL weight (0.5) were all tuned on this scale. At 10M-plus, the freeze fraction may need to rise, the adapter rank may need to grow, and the probe set composition may need to widen. The cited PEFT literature (\S2) addresses larger scales; the contribution here is the recipe at the sub-1M scale.
+
+\textbf{Abstention saturates at about 20\%.} A20 = A25 = 8.3/18 fabrication; more abstention data beyond 20\% buys nothing on the primary axis. Fabrication is reduced (16.7 to 8.3/18) but not eliminated. The residual 8 fabrications are not dose-limited; closing them likely needs a different signal (for example, boundary supervision on near-distribution unknowns), which is a V80+ question.
+
+\textbf{qrel hijack edge at A20.} A20 sits at 10.7\% question-relevance hijack, at the $\leq$ 10 guard edge; two of three A20 seeds are at 10 to 11\%, just outside the $\leq$ 10 guard band that P05 itself passes at 7.3\%. A25 worsens qrel hijack to 13.3\% (OOD champion but qrel breach). If the qrel hijack guard must hold below 10\% strictly, A20 is the registered near-balance point but the edge is real.
+
+\textbf{P10 stronger conservation trades off hijack.} P10 (probe-KL 1.0) gets better OOD hijack ($\sim$9\%) and better Discord perplexity (3.58), but question-relevance hijack rises to 12.3\%, breaching the $\leq$ 10 guard. P10 is documented as the stronger-conservation variant for callers who prioritize OOD over qrel.
+
+\textbf{Controlled PEFT baselines are 1M-only and boundary-light.} The LoRA $r \in \{4,16\}$, BitFit, and full-FT control arms in \S6.5 were run only on the 1M V87 and V88 chassis, not at the other five parameter budgets (500K, 300K, 100K, 50K, 10K), so the zoning-curve claim that LoRA's failure generalizes down-budget rests on extrapolation from the V78 sweep plus the two measured 1M points. The qrel echo/hijack boundary metrics for the control arms are single-seed (seed 42). The OOD hijack column is also seed-42 in the \S6.5 table, but the control arms now have full 3-seed collapse-inclusive coverage from \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md} (all 7 arms $\times$ seeds 42/43/44 regenerated with per-prompt output capture; legacy s42 values reproduce the registered log to the digit): under that correction the legacy s42 OOD degradation attributed to full-FT (16.9 vs 6.8 on V87; 22.0 vs 8.5 on V88) reads $-10.2$/$-8.5$ pp at s42 collapse-inclusive and $-1.7$/$-8.5$ pp on 3-seed means --- the V87 gap is within seed noise (tied), the V88 gap holds robustly (\S6.5 point 3). BitFit is structurally impossible on the V88 transformer (no biases) and was run only on V87; the V87 BitFit arm (77 bias vectors, 7{,}931 trainable scalars) is inert (0/0/0 EM, never learns the QA task), consistent with the trainable-parameter-budget reading of point 1 in \S6.5.
+
+\textbf{Generation metrics under the registered decode configuration.} Every generation-based metric (EM, echo, hijack, OOD hijack, chatter distinct-2, fabrication) is measured under the registered decode configuration of \S3.7: greedy with repetition penalty 1.2 and no-repeat-4-gram. In this codebase, the registered repetition penalty 1.2 and no-repeat-4-gram are applied only inside the sampling branch and are never reached under temperature 0, so the greedy branch takes argmax on unmodified logits and both knobs are inert. Raw-greedy verification across all 24 pretrained backbones confirms byte-identical outputs to the registered runs, so the anti-collapse and boundary numbers were not produced under decoder assistance. The chatter distinct-2 metric is reference-free internal diversity, not a direct fluency measure.
+
+\textbf{No external capability anchor on the fine-tuning axis.} No external capability benchmark (for example, MMLU, HellaSwag, or Lambada) was run on the fine-tuned arms. All perplexity and boundary numbers use the project's internal batteries (Discord-Dialogues held-out, qrel, OOD, fabrication), so the findings are about fine-tuning behavior on this corpus, not about absolute capability relative to the broader small-LM literature. (The pretrained backbones themselves now carry a WikiText-103 byte-PPL external anchor, reported in Part 1, \S8.13 [Lee, Part 1 of this series, companion paper].)
+
+\section{Conclusion}
+
+This paper has presented a composite-objective study of memorization and boundary discipline at the 1M scale, with FMSP (a five-phase fine-tuning recipe for sub-1M-parameter autoregressive language models) as the vehicle. The central finding, established by the \S6.5 controlled full-FT baseline, is that the composite objective (answer-only CE plus probe-KL) --- not the freeze-plus-adapter machinery --- is the first-order variable for memorization and language preservation at this scale; FMSP's residual differential value is OOD boundary discipline as a direction claim. The P05 configuration (freeze 5\%, true freeze, answer-only cross-entropy, probe-KL 0.5, KL\_qa 0.05, adapter rank 16, AdamW at 1e-3 with weight decay 0.01, WSD schedule, 10 epochs, best-validation-loss checkpoint, three seeds) achieves full-988 exact-match 544.3 (3-seed mean), question-relevance echo 91.3\%, question-relevance hijack 7.3\%, OOD hijack 17.5\% (3-seed mean), and Discord perplexity 3.68 on the V76-RPG 1M backbone, passing all four registered bars simultaneously. The four registered bars (per \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/V77_README.md}{V77\_README.md} \S8, which lists the thresholds without stating their rationale) are, with their operational meaning: full-988 EM $\geq$ 455 (the prior champion V67's registered EM, adopted as the minimum acceptable memorization); qrel echo $\geq$ 50\% (majority question engagement --- the model answers more than half of unseen near-distribution questions substantively); qrel hijack $\leq$ 10\% (the V77 project-internal guard against regurgitating a memorized answer to an unseen question); and Discord PPL language preservation (the gate prior FMSP regimes failed at 47 to 64; P05 reads 3.68 against the 3.31 backbone). The OOD and fabrication axes are reported as direction/open, not hard bars. The V79-A20 abstention extension halves fabrication (16.7 to 8.3/18) with EM dose-invariant (534.7 to 549, within P05 seed noise; A20 at 534.7). The six-size scaling study shows a memorization cliff between 500K and 300K parameters (EM 396.7 to 42.0 on the transformer, 279.3 to 56.3 on the mixer) and a hard EM=0 floor at or below 100K parameters for both architectures. The V86 architecture census shows that the long-standing ``routing ceilings'' reported across five old-era paradigms were recipe artifacts: V46-3, V58, V59, and V52 each gained hundreds of exact-match under P05. Three negative results close three future directions: V78 falsifies parameter partitioning for this zoning family at the sub-1M scale (memorization and hijack are the same circuit within the zone configurations tested), V77-M05 rejects margin-loss escalation (fabrication is not a confidence problem), and the V77-C2 true-freeze stage shows the AdamW weight-decay leak was real but not the behavioral cause. The V78 zoning falsification now carries a positive complement: the trainable-budget theory it implies is confirmed by a budget-matched LoRA r=64 success case ($\sim$992k trainable $\approx$ FMSP's $\sim$951k; r=64 EM is s42-only, while the FMSP reference is 3-seed) reaching $\sim$85\% of FMSP EM (478/566 vs 563.7/653.3) at 22 to 90$\times$ the failed standard-rank arms, so the binding variable is the trainable budget, not the full-rank parameterization (\S6.5 point 1, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}). Six findings emerge from this controlled study, of which three travel beyond this project to any freeze-style PEFT (the AdamW weight-decay leak; the parameter-partitioning falsification; and the recipe-as-architecture-level-variable meta-finding; \S1): a measured AdamW weight-decay leak that any freeze-style PEFT must defend against; a P05 recipe that preserves language while memorizing at sub-1M --- with the \S6.5 controlled full-FT baseline showing the composite objective, not the freeze-plus-adapter, carries memorization at 1M, so FMSP's differential value is OOD boundary discipline as a direction claim (tied on V87 at 3 seeds, robust on V88 under collapse-inclusive rescoring; \S6.5 point 3); a falsification of parameter partitioning with a portable mechanism map (adapter = question recognition, Fisher band = content, remixer = load-bearing for language), now confirmed by a budget-matched LoRA success case; a lesson that objective-level forgetting fixes beat structural ones; an abstention-by-self-distillation recipe that halves fabrication at zero memorization cost; and a meta-finding that the project's long-standing ``routing ceilings'' were recipe artifacts, not architecture-level limits. All numbers are reported under the exact registered recipe and the registered caveats on the OOD axis.
+
+\section*{Code, Data, and Model Availability}
+
+All source code (including \texttt{src/fmsp.py} and \texttt{experiment\_10k.py}, the registered FMSP runner with $\sim$100 registered arms), the V9-V88 design-note archive, and the abstention data files are public under Apache-2.0 at \url{https://github.com/llaa33219/MicroMixer-4}. The FMSP dataset is \url{llaa33219/small-qa-en-10k} and the pretraining corpus is \url{mookiezi/Discord-Dialogues} on Hugging Face. All fine-tuned checkpoints are released as safetensors-only repos under two collections: \url{https://huggingface.co/collections/llaa33219/micromixer-4} and \url{https://huggingface.co/collections/llaa33219/microt-test1}, with repos named \texttt{llaa33219/MicroMixer-4-\allowbreak\{1M,500K,300K,100K,50K,10K\}-\allowbreak\{Discord-Dialogues,\allowbreak UltraChat,\allowbreak SmolTalk2,\allowbreak TinyStories\}} and \url{llaa33219/MicroT-test1-{size}-{corpus}} (the corpus suffix is part of the repo name).
+
+\appendix
+\section{Post-registration correction evidence (summaries)}
+
+The three post-registration analyses below back the paper's correction-aware claims. The body (\S3.6, \S6.5 point 1, \S6.5 point 3) already contains the headline numbers; this appendix absorbs the procedure summaries so the corrections stand alone for the reader.
+
+\subsection{Selection-on-eval bias bound (494/494)}
+
+The \S3.6 quantification splits the 988 held-out paraphrases into a deterministic 494/494 contiguous halving, selects on one half, evaluates on the other, and averages. On V87-1M P05 s42, all three selection rules (full-988, half-A, half-B) pick epoch 9 because answer-only val\_loss decreases monotonically through all 10 P05 epochs on the full 988 and on both halves; the debiased estimate reconstructs the registered 564/988 exactly. \textbf{Selection-on-eval optimistic bias = 0.0 EM (0.0 pp)} at this checkpoint and seed, validating the body's ``mild'' characterization with a numeric bound. The bound is specific to the no-overfitting regime within 10 P05 epochs; it would need re-checking once val\_loss turns upward earlier. Procedure, per-epoch table, and reproduction commands: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PROBE_ABLATION_AND_SELECTION_ANALYSIS.md}{PROBE\_ABLATION\_AND\_SELECTION\_ANALYSIS.md}.
+
+\subsection{Budget-matched LoRA r=64 sweep}
+
+The \S6.5 point 1 budget-matched test is the r=64 arm (V87: 992{,}320 trainable, +4.3\% over FMSP's $\sim$951k; V88: 727{,}040, structurally 23.5\% under-budget), all five new arms seed-42. V87 r=64 reaches EM 478/988 (84.7\% of FMSP, 53$\times$ the failed r=16 arm); V88 r=64 reaches EM 566/988 (86.6\% of FMSP, 22$\times$ r=16); val\_loss drops 6--7$\times$ below the failed r=16 arm and within $\sim$2$\times$ of full fine-tune. A residual $\sim$13--15\% EM gap to FMSP survives at equal trainable count, and the boundary discipline is looser on the mixer (V87 r=64 qrel 73/22, OOD 23.7\% legacy / 42.4\% collapse-inclusive) though near-FMSP on the transformer (V88 r=64 qrel 93/4 $\approx$ FMSP, OOD 13.6\% legacy $\approx$ FMSP). An LR sweep at r=16 confirms 1e-3 was undertuned (3e-3 lifts EM 7--8$\times$ to 64/192), but the tuned ceiling remains 3--9$\times$ below r=64 --- budget moves EM by $\sim$400--500, LR tuning by $\sim$55--170. Full per-arm procedure, convergence tables, and reproduction commands: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_LORA_SWEEP_ANALYSIS.md}{PEFT\_LORA\_SWEEP\_ANALYSIS.md}.
+
+\subsection{PEFT OOD collapse-rescore (FMSP vs full-FT)}
+
+The \S6.5 point 3 rescore was run on all 7 PEFT arms $\times$ 3 seeds (42/43/44). At s42 the FMSP-vs-full-FT gap direction holds for both architectures: V87 $-10.2$ pp unchanged (35.6 vs 45.8), V88 $-8.5$ pp (down from 13.6 pp legacy). On 3-seed means the V87 gap is within seed noise ($\pm$1.7 pp, tied at $\sim$40\% rescored); the V88 gap holds robustly ($-8.5$ pp, all three seeds individually in the same direction). The collapse-evasion failure mode is architecture-level, not method-level: V88 arms inflate 45--55 pp at any mechanism; V87 arms inflate 6--30 pp --- so the corrected gap is mostly surfacing the mixer-vs-transformer collapse asymmetry, not a fine-tuning-method effect. Per-arm per-seed tables, the FMSP-arm rescore, and reproduction commands: \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/PEFT_OOD_RESCORE_ANALYSIS.md}{PEFT\_OOD\_RESCORE\_ANALYSIS.md}.
+
+\section*{References}
+
+\par\hangindent=1.5em Allen-Zhu, Z., and Li, Y. (2023). ``Physics of Language Models: Part 3.1, Knowledge Storage and Extraction.'' arXiv preprint. arXiv:2309.14316.
+
+\par\hangindent=1.5em Allen-Zhu, Z., and Li, Y. (2024). ``Physics of Language Models: Part 3.3, Knowledge Capacity Scaling Laws.'' arXiv preprint. arXiv:2404.05405.
+
+\par\hangindent=1.5em Ben-Zaken, E., Ravfogel, S., and Goldberg, Y. (2022). ``BitFit: Simple Parameter-efficient Fine-tuning for Transformer-based Masked Language-models.'' \emph{Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (ACL)}. arXiv:2106.10199.
+
+\par\hangindent=1.5em Carlini, N., et al. (2022). ``Quantifying Memorization Across Neural Language Models.'' arXiv preprint (revised 2023). arXiv:2202.07646.
+
+\par\hangindent=1.5em Ding, N., et al. (2023). ``Enhancing Chat Language Models by Scaling High-quality Instructional Conversations.'' arXiv preprint. arXiv:2305.14233.
+
+\par\hangindent=1.5em [Discord-Dialogues] mookiezi/Discord-Dialogues, Hugging Face dataset. (No associated paper; cite as dataset.)
+
+\par\hangindent=1.5em Fu, D. Y., et al. (2023). ``Hungry Hungry Hippos: Towards Language Modeling with State Space Models.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:2212.14052.
+
+\par\hangindent=1.5em Gu, A., and Dao, T. (2023). ``Mamba: Linear-Time Sequence Modeling with Selective State Spaces.'' arXiv preprint. arXiv:2312.00752.
+
+\par\hangindent=1.5em Gu, A., Goel, K., and R\'e, C. (2022). ``Efficiently Modeling Long Sequences with Structured State Spaces.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:2111.00396.
+
+\par\hangindent=1.5em Hinton, G., Vinyals, O., and Dean, J. (2015). ``Distilling the Knowledge in a Neural Network.'' \emph{NeurIPS Deep Learning and Representation Learning Workshop}. arXiv:1503.02531.
+
+\par\hangindent=1.5em Houlsby, N., et al. (2019). ``Parameter-Efficient Transfer Learning for NLP.'' \emph{Proceedings of the 36th International Conference on Machine Learning (ICML)}. arXiv:1902.00751.
+
+\par\hangindent=1.5em Hu, E. J., et al. (2022). ``LoRA: Low-Rank Adaptation of Large Language Models.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:2106.09685.
+
+\par\hangindent=1.5em Kang, H., Mo, S., and Shin, J. (2022). ``OAMixer: Object-aware Mixing Layer for Vision Transformers.'' \emph{CVPR Transformers for Vision Workshop}. arXiv:2212.06595. (Vision paper; the project's ReMixerLayer is an adaptation of OAMixer's exponential similarity mask to causal byte-level mixing with byte-identity labels.)
+
+\par\hangindent=1.5em Kirkpatrick, J., et al. (2017). ``Overcoming Catastrophic Forgetting in Neural Networks.'' \emph{Proceedings of the National Academy of Sciences (PNAS)}, vol. 114, no. 13, pp. 3521 to 3526. arXiv:1612.00796.
+
+\par\hangindent=1.5em [Lee, Part 1 of this series, companion paper] Lee, S. (2026). ``What Capacity Buys at Sub-1M: A CCD-Mixer Study of Attention-Free Language Models.'' Companion paper, Part 1 of this series.
+
+\par\hangindent=1.5em [Lee, Part 3 of this series, companion paper] Lee, S. (2026). ``Corpus First at the 1M Budget: A Controlled Pretraining-Corpus Sweep of Sub-1M Mixer and Transformer Language Models.'' Companion paper, Part 3 of this series.
+
+\par\hangindent=1.5em Lee-Thorp, J., et al. (2022). ``FNet: Mixing Tokens with Fourier Transforms.'' \emph{Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (NAACL-HLT)}, pp. 4296 to 4313. arXiv:2105.03824.
+
+\par\hangindent=1.5em Li, Z., and Hoiem, D. (2017). ``Learning without Forgetting.'' \emph{IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI)}, vol. 40, no. 12, pp. 2935 to 2947 (originally ECCV 2016). arXiv:1606.09282.
+
+\par\hangindent=1.5em Liu, H., Dai, Z., So, D. R., and Le, Q. V. (2021). ``Pay Attention to MLPs.'' \emph{Advances in Neural Information Processing Systems 34 (NeurIPS 2021)}. arXiv:2105.08050.
+
+\par\hangindent=1.5em Loshchilov, I., and Hutter, F. (2019). ``Decoupled Weight Decay Regularization.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:1711.05101.
+
+\par\hangindent=1.5em Poli, M., et al. (2023). ``Hyena Hierarchy: Towards Larger Convolution Language Models.'' \emph{Proceedings of the 40th International Conference on Machine Learning (ICML)}. arXiv:2302.10866.
+
+\par\hangindent=1.5em Qin, Y., et al. (2024). ``MiniCPM: Unveiling the Potential of Small Language Models with Scalable Training Strategies.'' \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL)} (WSD = warmup-stable-decay schedule). arXiv:2404.06395.
+
+\par\hangindent=1.5em Shazeer, N. (2020). ``GLU Variants Improve Transformer.'' arXiv preprint. arXiv:2002.05202. (SwiGLU is a variant in this paper, not the title.)
+
+\par\hangindent=1.5em [small-qa-en-10k] llaa33219/small-qa-en-10k, project dataset. (Cite as project artifact.)
+
+\par\hangindent=1.5em Su, J., et al. (2024). ``RoFormer: Enhanced Transformer with Rotary Position Embedding.'' \emph{Neurocomputing}, vol. 568, article 127063. arXiv:2104.09864.
+
+\par\hangindent=1.5em Tay, Y., et al. (2021). ``Synthesizer: Rethinking Self-Attention for Transformer Models.'' \emph{Proceedings of the 38th International Conference on Machine Learning (ICML)}, pp. 10183 to 10192. arXiv:2005.00743.
+
+\par\hangindent=1.5em Tolstikhin, I., et al. (2021). ``MLP-Mixer: An all-MLP Architecture for Vision.'' \emph{Advances in Neural Information Processing Systems 34 (NeurIPS 2021)}. arXiv:2105.01601.
+
+\par\hangindent=1.5em Xu, R., et al. (2021). ``Raise a Child in Large Language Model: Towards Effective and Generalizable Fine-tuning.'' \emph{Proceedings of the 2021 Conference on Empirical Methods in Natural Language Processing (EMNLP)}. arXiv:2109.05687.
+
+\par\hangindent=1.5em Zhao, M., et al. (2020). ``Masking as an Efficient Alternative to Finetuning for Pretrained Language Models.'' \emph{Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing (EMNLP)}. arXiv:2004.12406.
+
+\end{document}

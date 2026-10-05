@@ -1,0 +1,1101 @@
+% arXiv submission draft --- Part 3 of 3 (pretraining-corpus sweep)
+% Target categories: cs.CL (primary), cs.LG (cross-list)
+% Source of truth: arxiv/paper3_dataset_sweep.md (content identical)
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\emergencystretch=2em
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage[colorlinks,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{footmisc}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{microtype}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+}
+
+\title{Corpus First at the 1M Budget: A Controlled Pretraining-Corpus Sweep of Sub-1M Mixer and Transformer Language Models}
+\author{Siu Lee \\ \texttt{lukems903@gmail.com} \\ \textit{Independent Researcher}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Small-model boundary evaluation is artifact-prone: a single binary choice --- a collapse-inclusive hijack detector or a collapse-blind one, an in-distribution probe register or a discord one --- can manufacture or erase an architecture comparison at this scale. We present two methodological contributions and apply them. \textbf{(i) A 2$\times$2 OOD boundary audit} that varies probe anchors $\times$ evaluation register, run under the MicroMixer-4 registered 2-architecture $\times$ 6-budget protocol (a non-LTI content-gated dilated-convolution mixer against a vanilla transformer; byte-identical recipes; budgets 10K--1M; backbone seed 42; FMSP fine-tuning across seeds 42/43/44) against a controlled pretraining-corpus sweep over four corpora (Discord-Dialogues, UltraChat, SmolTalk2, TinyStories; 200K row cap). \textbf{(ii) A collapse-inclusive rescore} that reclassifies periodic word-3-gram $\geq 5\times$ loops as hijack. The audit decomposes a $4\times$--$10\times$ ``OOD-hijack explosion'' on the new corpora ($7\times$--$10\times$ for the mixer, $4\times$--$5\times$ for the transformer) into a probe-register mismatch (M1, $\sim$$2\times$--$3\times$) and an evaluation-register mismatch (M2, $\sim$$2\times$--$3\times$) with a small backbone residual. The collapse-inclusive rescore shows the registered 500K transformer OOD ``win'' was a detection artifact: a 37.8pp swing on an 18.1pp measured gap, driven by a periodic content loop (V88-500K loops on $\sim$44\% of casual OOD prompts) that the legacy memorization-matching hijack detector scores ``free''. Both findings are seed-stable across three fine-tuning seeds.
+
+With the corrected metric as the test bed, the controlled corpus sweep lifts held-out exact match (EM: verbatim retrieval of trained answers on 988 unseen paraphrased questions) by $+13\%$ to $+29\%$ at 1M and $2.4\times$ to $5.0\times$ at 300K on the 3-seed/3-seed basis, and the architecture gap collapses from a robust $+89.6$ EM on the noisy discord baseline to a statistically undetectable $+12.3$ EM on the most-curated corpus (SmolTalk2 at 1M, 3 seeds: V87 mean 729.0 (sample sd 8.9) vs V88 mean 741.3 (sample sd 3.1), Welch $p = 0.13$, permutation $p = 0.20$; on UltraChat the 1M gap is the largest point gap, $+46.0$ EM, $p = 0.012$, not significant after the Bonferroni correction $\alpha = 0.0083$). The compared corpora still differ $14\times$ to $23\times$ in words per epoch; a per-token efficiency inversion bounds this volume confound but does not eliminate it.
+
+The three fine-tuning seeds (42/43/44) ride on a single seed-42 backbone, so all backbone-level pretraining comparisons remain $n = 1$ except the discord-1M reference cell, which Part 1 now reports at three pretrain seeds (the discord-1M architecture gap replicates across backbone seeds; \S3.7). Chatter and the UC/ST non-EM metrics are single-seed (s42) and reported as trends, not statistics. The mixer's anti-collapse chatter advantage is register-dependent and does not transfer across training-distribution styles. The 500K$\to$300K memorization cliff and the EM=0 floor at $\leq 100$K replicate across all six architecture $\times$ corpus cells tested, and architecture-comparison claims are bounded to this two-architecture pair.
+\end{abstract}
+
+\section{Introduction}
+
+\paragraph{Why this paper is not a corpus sweep.}
+Boundary evaluation of sub-1M language models is not a solved measurement problem. Three evaluation-pipeline choices --- the hijack detector's collapse-sensitivity, the in-distribution probe anchors the FMSP fine-tune steers to, and the register of the OOD battery used at eval time --- are usually treated as fixed knobs in empirical ML papers, but at this scale they are not knobs: each is a factor that can manufacture or erase an architecture comparison. The MicroMixer-4 series treats them as factors. The headline finding of the registered Part 1 study --- that the CCD-Mixer's anti-collapse chatter moat is real on a casual-discord register --- is in part an artifact of the legacy collapse-blind hijack detector, and the registered 500K transformer OOD ``win'' inverts under a collapse-inclusive rescore. A $4\times$--$10\times$ OOD-hijack ``explosion'' on the new corpora decomposes, under the same audit, into a probe-register mismatch (M1, $\sim$$2\times$--$3\times$) and an evaluation-register mismatch (M2, $\sim$$2\times$--$3\times$) with only a small backbone residual. The methodological contribution of this paper is to specify the audit and the rescore so that they can be reused. The controlled pretraining-corpus sweep is the test bed, not the headline.
+
+Small language models are increasingly important in production: on-device assistants, edge inference, latency-bounded applications, and the whole research program of ``what does a tiny model actually need?'' The answers in this regime are noisy. Capacity is so scarce that every architectural choice, every recipe knob, and every data token spends its budget near-fractally, and the literature often reports a single win on a single corpus as if it generalized. At the sub-1M scale the question \emph{what was the lever?} becomes uncomfortable. Is a two-point perplexity drop evidence of a better token-mixer, or just evidence that pretraining happened to land on a friendlier slice of text?
+
+The MicroMixer-4 project has previously registered, frozen, and instrumented a single architecture pair across six parameter budgets under byte-identical recipes: a non-LTI content-gated CCD-Mixer [Lee, Part 1 of this series, companion paper] and a deliberately boring vanilla transformer control [Lee, Part 1 of this series, companion paper]. The two share optimizer, scheduler, byte-level tokenizer, training length, eval battery, and seeded fine-tuning protocol, P05 FMSP [Lee, Part 2 of this series, companion paper]. The headline numbers of the registered study, namely 1M EM 563.7 vs 653.3, qrel echo 95\%/94\%, OOD hijack 6.8\%/8.5\%, chatter d2 0.883 vs 0.838, were measured on a single pretraining corpus (Discord-Dialogues) at one seed (42), and the registered protocol applies unchanged to the work in this paper. All new pretrains and the original FMSP runs use a single seed (42); for this paper we additionally put 3-seed error bars (seeds 42/43/44) on the EM axis at the three capability sizes across all 12 UC/ST arms (\S4.2.1) and extended the discord non-EM battery to 3 seeds (\S4.4.1); chatter everywhere and the UC/ST non-EM metrics remain single-seed trends. The full seed-coverage policy is stated once in \S3.7. The registered s42 OOD 1M near-parity (6.8\% vs 8.5\%) does not survive the 3-seed extension on the legacy collapse-blind metric (the transformer leads at the 3-seed mean; full data in \S4.4.1) --- a direct seed-noise confirmation (before any collapse rescoring) of the \S5 ``lucky corner'' note. The OOD mechanism findings are confirmed across three seeds.
+
+Two questions drive everything that follows:
+
+\begin{enumerate}
+  \item \textbf{At the sub-1M scale, how much of ``architecture quality'' is actually ``data quality''?}
+  \item \textbf{Are the OOD-boundary and anti-collapse metrics measuring the model, or measuring the probe and the register (the training-distribution style the model was fine-tuned on)?}
+\end{enumerate}
+
+The first question is the controlled pretraining-corpus study. We vary the pretraining corpus and, necessarily, the in-distribution FMSP probe anchors (\S3.4); architecture, recipe, budget, seed, fine-tune, and eval battery are held fixed. We add three new corpora (UltraChat, SmolTalk2, TinyStories) at an identical requested cap (200K; UltraChat tops out at 146K), flatten them through the same byte pipeline, and rerun 36 pretrains and 24 FMSP/eval jobs. The corpus-linked delta under this in-distribution anchor policy is large enough to render the architecture gap on the most heavily curated corpus statistically undetectable at three seeds (3 seeds: $+12.3$ EM, Welch $t = 2.27$, $df = 2.47$, $p = 0.13$; permutation $p = 0.20$ --- not significant; \S4.6), and small enough to be dataset-rankable on every metric. That is the controlled-study equivalent of an asymptote: when the architecture term becomes small against the data term, the parameter budget you spent on the architecture was largely wasted.
+
+The second question is the OOD-boundary audit. The registered study reported a $4\times$ to $10\times$ ``OOD-hijack explosion'' on the new corpora ($7\times$ to $10\times$ for the mixer, $4\times$ to $5\times$ for the transformer; \S4.8), and a single-seed 500K transformer ``win'' in casual-OOD hijack (11.9\% vs 35.6\%). A $2\times 2$ design that varies probe anchors and evaluation register, a 3-seed re-run of the new probe-anchor arms, and a collapse-aware rescoring of the original outputs, together show that both readings are partly or largely artifacts of (a) the discord-register of the probe anchors being run against instruction-tuned models and (b) a content-loop collapse that the legacy hijack classifier does not detect. After correction, the 500K OOD ordering inverts, and the 1M near-parity reads as a different value entirely. The model-versus-claim boundary is the central interpretive contribution of this paper.
+
+\subsection{Contributions}
+
+This paper makes five contributions, framed as portable lessons for any sub-1M controlled-corpus study:
+
+\begin{enumerate}
+
+
+  \item \textbf{A measurement contribution: boundary metrics for tiny LMs must be reported as (register-pair $\times$ collapse-inclusive).}
+
+  \item \textbf{Methodological portability: probe composition is a free lever on the boundary axis, but it splits along architecture.}
+
+  \item \textbf{A controlled estimate of corpus effects at micro scale, conditional on the co-varied probe anchors and Fisher profile (\S3.4).}
+
+  \item \textbf{Architecture ``moats'' (advantages) can be corpus artifacts.}
+
+  \item \textbf{Cross-corpus replication of capability-ordering regularities.}
+\end{enumerate}
+
+The paper's status is trends with three-seed-confirmed EM and mechanism findings: all 36 new pretrain arms and the original 24 FMSP arms use seed 42, with 3-seed error bars added on the EM axis (1M/500K/300K $\times$ 12 UC/ST arms, \S4.2.1: 24 new FMSP reruns + 24 new evals, seeds 42/43/44) and on the discord non-EM battery (\S4.4.1); chatter everywhere and the UC/ST non-EM metrics remain single-seed (s42). The full seed-coverage policy --- including the three-way split (EM 3-seed; discord non-EM 3-seed; chatter and UC/ST non-EM s42) --- is stated in \S3.7; this paragraph is a summary, \S3.7 is canonical. The qrel bar conclusions are seed-stable (V88 clears qrel at $\geq 500$K, V87 does not), fabrication ranges are seed-stable, and Discord PPL is seed-stable (s42/s43/s44). The OOD mechanism findings (M1, M2, the collapse rescore, and the architecture split in probe-KL steerability) are confirmed across three seeds.
+
+Section 2 places this work in the small-data, controlled-corpus, and detector-artifact literatures. Section 3 specifies the experimental design: the $2 \times 4 \times 6$ grid, the corpus tables, the byte-flattening procedures, the one protocol change, and the frozen recipes. Section 4 reports per-corpus results and the headline findings. Section 5 conducts the OOD boundary audit. Section 6 reports the replicated scaling patterns, with the scope caveat spelled out under the section heading. Section 7 lists the limitations verbatim. Section 8 concludes.
+
+\subsection{Glossary of project terms}
+
+\begin{itemize}
+  \item \textbf{Registered.} An experiment whose architecture, recipe, and results are frozen in the project record before any post-registration analysis. The registered discord-arm numbers in this paper are inherited from [Lee, Part 1 of this series, companion paper] and [Lee, Part 2 of this series, companion paper] and are not re-run here.
+  \item \textbf{Chatter.} The project's 9-prompt open-conversation battery; the metric is distinct-2 (d2), the fraction of unique word bigrams in a generation. WIN bar = mean d2 $\geq 0.90$ AND 0 cycles.
+  \item \textbf{Echo.} A question-relevance response that repeats or closely paraphrases the input question; reported as a percentage over 100 unseen questions.
+  \item \textbf{Hijack.} A question-relevance response that ignores the question and emits memorized content or a degenerate loop; reported as a percentage over 100 questions.
+  \item \textbf{OOD hijack.} The hijack rate on out-of-distribution prompts (the casual and formal batteries, \S3.6 metric 6); measured as echo/hijack/free over 59 (casual) or 60 (formal) prompts.
+  \item \textbf{Zoning.} The hypothesis that FMSP parameter-freezing partitions the model into a memorization zone and a frozen zone; falsified in [Lee, Part 2 of this series, companion paper] V78.
+  \item \textbf{Collapse-inclusive.} A hijack detector that reclassifies periodic-orbit content loops (word-3-gram $\geq 5\times$ repeats) as hijack; the legacy detector is collapse-blind (a loop matches no memorized answer and scores ``free'').
+  \item \textbf{Dprobe.} An FMSP arm whose probe-KL register anchors are forced to the discord register while the backbone stays pretrained on UC or ST; the $2\times 2$ control in \S5.1.
+\end{itemize}
+
+Table 1.1 collects the project-internal terms used in this paper; the glossary of \S1.2 gives the longer definitions.
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 1.1. Nomenclature.}
+\begin{tabular}{p{4.4cm}p{11.2cm}}
+\toprule
+term & meaning \\
+\midrule
+V87 & the champion CCD-Mixer chassis (content-gated dilated-convolution token-mix), frozen from V83-RPG; six parameter budgets \\
+V88 & the vanilla transformer reference (RoPE q/k, GELU MLP, no biases, d\_head=16, tied byte head) at the same six budgets \\
+MicroMixer-4 / MicroT-test1 & Hugging Face repo names of the V87 / V88 families (\texttt{\{size\}-\{corpus\}} suffix; 24 repos per family) \\
+P05 (FMSP) & the registered fine-tuning recipe: true 5\% Fisher-guided freeze, answer-only CE, probe-KL $\lambda2 = 0.5$, rank-16 adapter, WSD schedule [Lee, Part 2 of this series, companion paper] \\
+\midrule
+discord / UC / ST / TS & corpus tags: Discord-Dialogues (registered baseline), UltraChat (146K cap), SmolTalk2 (200K cap), TinyStories (pretrain-only) \\
+$2 \times 4 \times 6$ grid & 2 architectures $\times$ 4 corpora $\times$ 6 budgets; 36 new pretrains + 24 FMSP runs (\S3.8a) \\
+byte-flattening & the common \texttt{User:/Assistant:} byte pipeline every corpus passes through (\S3.3) \\
+probe anchors / register anchors & the 1,200 in-distribution probe-KL sequences P05 anchors the frozen backbone to; corpus-linked by protocol (\S3.4) \\
+Fisher profile / window & the per-scalar profiling matrix P05 freezes by; rebuilt per corpus from the \texttt{[2000:3200]} window (\S3.4) \\
+own-probe / Dprobe & in-distribution anchors vs anchors forced back to the discord register; the $2 \times 2$ control of \S5.1 \\
+capability sizes / cells & 1M/500K/300K; the 18 EM cells (2 arch $\times$ 3 chat corpora $\times$ 3 sizes) \\
+\midrule
+arm / battery & a named registered configuration / a fixed eval suite \\
+full-988 EM / internal-200 EM & exact match on the 988 held-out QA answers / on the first 200 (speed subsample); full-988 is reported with FT\% (format-passing share), P3\% (first-token-correct share), WO (mean WordOverlap) \\
+distinct-2 (d2) / cycles & unique-word-bigram fraction of a generation / loop-detector count out of the 9 chatter prompts \\
+WIN bar / TIE bar & chatter pass bars: mean d2 $\geq 0.90$ AND 0 cycles / V76's 0.872 mean d2 (cycles not required) \\
+qrel / qrel bar & 100 unseen questions scored echo/hijack/free; the bar is echo $\geq 50\%$ AND hijack $\leq 10\%$ \\
+casual / formal OOD batteries & the 59-prompt casual vs 60-prompt formal OOD sets (\S3.6, metric 6) \\
+fabrication X/18 / langpreserve & fabricated answers among the 18 abstention-trained probes / the discord\_PPL--qa1k\_TF\_PPL--distinct2 triple measuring FMSP-induced forgetting \\
+raw-greedy verification & registered runs replayed with the decode knobs removed; outputs byte-identical (the knobs are inert at $T = 0$) \\
+\midrule
+M1 / M2 / M3 & decomposition of the UC/ST OOD explosion: probe-register mismatch ($\sim$$2\times$--$3\times$) / eval-register asymmetry ($\sim$$2\times$--$3\times$) / small backbone residual \\
+register / register-pair & training-distribution style; OOD boundary is a (register-pair $\times$ collapse-inclusive) property \\
+register-locked & the mixer's boundary cannot be steered by probe anchors; anchors redistribute, never reduce \\
+moat / lucky corner & an architecture advantage (the chatter moat is register-dependent) / a favourable s42 reading of a noisy metric \\
+collapse-rescore / probe A & reclassifying periodic word-3-gram $\geq 5\times$ loops as hijack; flips the single-seed 500K OOD ordering (the 500K inversion) \\
+300K inversion & the mixer beats the transformer on EM at 300K, inverting the 1M/500K ordering \\
+memorization cliff / EM=0 floor & EM drops $2.6\times$ to $4.2\times$ from 500K to 300K; EM is exactly 0 at $\leq 100$K, where end-of-epoch train CE $\gtrsim 0.77$ \\
+\midrule
+s42/s43/s44 & seed shorthand (seeds 42/43/44); EM lifts use the 3-seed/3-seed basis (3-seed UC/ST means over 3-seed discord means), the mixed basis secondary \\
+analysis note / canonical & a post-registration companion analysis (DATASET-CMP, MECH, MSD, CRS, CONTAM, CORPUS-PROXY; not a versioned experiment --- there is no V89) / the authoritative statement of a policy (``\S3.7 is canonical'') \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Related Work}
+
+The controlled micro-scale study sits at the intersection of five literatures.
+
+\textbf{Attention-free token mixing.} MLP-Mixer [Tolstikhin et al., 2021] and gMLP [Liu et al., 2021] established all-MLP token mixing; FNet [Lee-Thorp et al., 2022] and Synthesizer [Tay et al., 2021] replaced learned pairwise attention with Fourier transforms or synthetic mixing patterns. S4 [Gu et al., 2022], H3 [Fu et al., 2023], Hyena [Poli et al., 2023], and Mamba [Gu and Dao, 2023] extend efficient sequence modeling through structured state spaces, gated state-space mechanisms, or long convolutions. V87's CCD-Mixer [Lee, Part 1 of this series, companion paper], a non-LTI content-gated dilated-convolution mixer, sits in this lineage; V88 is the attention-based transformer control.
+
+\textbf{Small-data curriculum and chat corpora.} The TinyStories study [Eldan and Li, 2023] of Eldan and Li demonstrated that a 10M-parameter model can produce coherent English when pretrained exclusively on short, vocabulary-bounded children's stories generated by GPT-3.5 and GPT-4; the result is the canonical evidence that data simplicity, not data volume, is what a small model needs first. Gunasekar et al.'s ``Textbooks Are All You Need'' [Gunasekar et al., 2023] reached the same conclusion by training a small model on ``textbook-quality'' web text and reported competitive coding capability at the 1.3B scale. Both are corpus-curation arguments at the small-model regime. The corpus sweep in this paper is directly downstream of both: we treat TinyStories as a lower bound on data complexity, SmolTalk2 and UltraChat as mid and high-complexity chat-format corpora, and Discord-Dialogues as the project's registered baseline.
+
+\textbf{Filtered and curated large-scale chat corpora.} UltraChat, as introduced by Ding et al. [Ding et al., 2023], is a large-scale auto-generated multi-round instructional dialogue corpus; this study uses the \href{https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k}{HuggingFaceH4/ultrachat\_200k} derivative, which yields 146K train\_sft samples as streamed by the project's loader (the dataset card instructs derivative users to cite the parent paper). SmolTalk2 [Hugging Face, 2025], released by HuggingFaceTB as part of SmolLM3, is a 406K-row curated chat corpus built via the \texttt{smollm3\_smol\_magpie\_ultra\_no\_think} configuration (the dataset card is the formal citation; a SmolLM3 technical blog accompanies the release and has no formal venue). SmolLM2 itself [Ben Allal et al., 2025], the small-LM training recipe paper of Ben Allal et al., is the formal citation for the SmolTalk family.
+
+\textbf{Data-mixture optimization and data-centric LMs.} DoReMi [Xie et al., 2023] proposed domain weights learned by a group-min objective and demonstrated that mixture reweighting accelerates pretraining at billion-parameter scale. DataComp-LM [Li et al., 2024] introduced a filter-based benchmark for dataset design at LLM scale. FineWeb [Penedo et al., 2024] is a large-scale web filter pipeline. OLMo [Groeneveld et al., 2024] released fully open training data, code, and checkpoints to enable controlled data ablations. Pythia [Biderman et al., 2023] is the early controlled-suite benchmark: a family of models trained on identical data with matched hyperparameters across scales, intended for analysis experiments. The present study inherits the controlled-suite philosophy of Pythia and the data-centric methodology of OLMo and shrinks them to a 1M-parameter budget. At that scale we cannot afford a multi-domain mixture optimization in the DoReMi sense; we instead sweep four single-domain corpora under a single-byte pipeline.
+
+\textbf{Knowledge capacity and scaling laws (external literature).} Allen-Zhu and Li [Allen-Zhu and Li, 2024] (Part 3.3) derive knowledge-capacity scaling laws for transformer language models and show that roughly 2 bits per parameter is an approximate capacity ceiling: models store up to about 2 bits of knowledge per parameter, and below that ceiling capacity is the binding constraint on memorization. Carlini et al. [Carlini et al., 2022] quantify memorization across model scales and find that verbatim memorization emerges at a model-size-dependent training-time threshold. The replicated EM = 0 floor at $\leq 100$K reported in \S6.2 of the present paper is consistent with the Allen-Zhu capacity ceiling at a 2-bit-per-parameter approximation: the headroom is what makes the floor reproducible across the two architectures in this study, and what makes changing the corpus lift the floor without removing the cliff.
+
+The four-corpus architecture-pair experiment in this paper is, as far as we are aware, the first controlled pretraining-corpus sweep at sub-1M parameter scale with a non-attention backbone paired against a vanilla-attention reference. It is also the first systematic study to audit a small-LM chat-formatter OOD metric for both probe-register and collapse-detection artifacts at the same time.
+
+\section{Experimental Design}
+
+\subsection{The Controlled Grid}
+
+The full sweep is a $2 \times 4 \times 6$ grid:
+
+\begin{itemize}
+  \item \textbf{Architectures (factor A, held fixed across all runs).} V87 Final, the CCD-Mixer champion [Lee, Part 1 of this series, companion paper], and V88, the vanilla decoder-only transformer with causal MHA (RoPE [Su et al., 2024] $\theta=10000$ on q/k), GELU MLP, no biases anywhere, d\_head=16 at every size, and tied byte head. V87 and V88 share the byte-level ByteTokenizer (vocab=256), the AdamW optimizer with weight decay 0.01, the WSD scheduler with 500-step warmup, batch size 16, max-grad-norm 1.0, three epochs, seed 42 by default, and gradient accumulation 1.
+  \item \textbf{Pretraining corpora and FMSP probe anchors (factor B, varied together by protocol).} We vary the pretraining corpus and, necessarily, the in-distribution FMSP probe anchors (\S3.4); architecture, recipe, budget, seed, fine-tune, and eval battery are held fixed. The corpora are Discord-Dialogues (registered baseline), UltraChat, SmolTalk2, and TinyStories.
+  \item \textbf{Parameter budgets (factor C).} 1M, 500K, 300K, 100K, 50K, 10K. Parameter counts at matched budgets are near-identical at 1M (within 0.014\%; 137/996,736 = 0.0137\%) and differ by 1.4\% to 2.9\% at the other five budgets: V87 996,873/491,742/292,525/95,084/48,684/9,666; V88 996,736/498,528/297,680/97,872/49,888/9,808.
+\end{itemize}
+
+The total pretraining budget is 36 runs (2 architectures $\times$ 3 new corpora $\times$ 6 budgets; TinyStories is excluded from FMSP because there is no analogue of the answer-only region in free-flowing children's prose, and the registered discord arm provides 6 sizes $\times$ 1 corpus $\times$ 2 arches = 12 cell-pairs that are unchanged). The FMSP and full eval battery rerun adds 24 runs (V87/V88 $\times$ UC/ST $\times$ 6 budgets), producing 24 eval-script invocations (6 metrics $\times$ UC/ST $\times$ V87/V88); each invocation spans all 6 budgets, so the underlying eval-cell count is $6 \times 2 \times 2 \times 6 = 144$ cells. The full run-accounting table is in \S3.8a.
+
+\subsection{Corpora}
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Corpus table (Table 3.2a).}
+\begin{tabular}{lp{4.4cm}lp{6.4cm}}
+\toprule
+tag & source & samples & format \\
+\midrule
+discord & \texttt{mookiezi/Discord-Dialogues} & 200K (5-turn windows) & \texttt{User:/Assistant:} multi-turn (registered V87/V88 baseline) \\
+UC & \texttt{HuggingFaceH4/ultrachat\_200k}, \texttt{train\_sft} split & 146K & \texttt{User:/Assistant:} multi-turn \\
+ST & \texttt{HuggingFaceTB/smoltalk2}, \texttt{smoltalk\_\allowbreak smollm3\_\allowbreak smol\_\allowbreak magpie\_\allowbreak ultra\_\allowbreak no\_\allowbreak think} split & 200K cap & \texttt{User:/Assistant:} multi-turn \\
+TS & \texttt{roneneldan/TinyStories} (V6 subset) & 200K cap & continuous prose; no \texttt{User:/Assistant:} markers; pretrain-only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+UltraChat is capped at 146K because the public corpus caps at 146K train\_sft samples. Per-epoch data volume and optimizer-step counts differ substantially across corpora despite the common 200K row cap: at 3 epochs and batch size 16 the UC arm sees $\sim$27,375 optimizer steps vs $\sim$37,500 for discord and ST, a 27\% gap in update count ([Lee, 2026b] measured discord at 9.6M words / 52.7 MB per epoch, UC at 137.3M words / 839.1 MB, ST at 221.1M words / 1,368.6 MB; rows $\times$ 3 epochs / batch 16). So the UC arm absorbs 27\% fewer optimizer updates than discord/ST --- yet it still tops discord by $+13\%$ to $+23\%$ on the 1M EM axis. The volume confound is therefore a live alternative explanation: the UC and ST arms also carry $14\times$ to $23\times$ more words per epoch than the discord arm, so the lift could be partly a quantity effect (UC's 137.3M words/epoch $\div$ discord's 9.6M = $14.3\times$; ST's 221.1M $\div$ 9.6M = $23.0\times$), and the design fixes the \textbf{row cap} (200K) and the \textbf{optimizer-step count} ($\approx 27\%$ fewer for UC) but does not fix the word-per-row rate. The paper's actual evidence that bears on this confound is (a) the equal requested 200K row cap and the controlled recipe (one that varies only the corpus, not the optimizer-step count or byte pipeline), (b) UltraChat topping out at 146K so the UC arm absorbs 27\% fewer optimizer steps than discord/ST despite carrying $14\times$ more words per epoch, and (c) a per-token efficiency reading that inverts the volume confound: averaging across architectures at 1M, discord yields 563.7--653.3 EM on 9.6M words/epoch ($\approx$58.7--68.1 EM per M-word), UC yields 695.3--741.3 EM on 137.3M words/epoch ($\approx$5.1--5.4 EM per M-word), and ST yields 729.0--741.3 EM on 221.1M words/epoch ($\approx$3.3--3.4 EM per M-word) --- the cleaner corpora are $10\times$ to $20\times$ less efficient per word than the noisier discord corpus, so the absolute lift is \emph{not} a per-token-efficiency effect (the larger corpora spend more words per EM point). The clean reading is that under this equal-cap design the corpus lifts 1M EM by $+13\%$ to $+29\%$ at 3-seed and the volume confound is bounded by the equal row cap and the per-token inversion above; the residual confound is that the three corpora still differ in word-per-row rate ($14\times$ to $23\times$) and that the design cannot fully separate corpus content from corpus volume, so the ``quality dominates quantity'' conclusion is conditional on equal requested 200K-cap design and on the per-token inversion above. The cap-vs-discord lifts hold at $+13\%$ to $+29\%$ at 1M (3-seed), larger than what a 27\% step-count gap would predict. TinyStories is not run through FMSP because the answer-only CE has no analogue in the corpus.
+
+\textbf{Scope of the capability (EM) claim.} The three chat-format corpora (discord, UC, ST --- all \texttt{User:/Assistant:} multi-turn) are the corpus base for every capability (full-988 EM, internal-200 EM) claim in this paper: the EM axis has 2 architectures $\times$ 3 chat corpora $\times$ 3 capability sizes = 18 capability cells (plus the inherited discord baseline). TinyStories is included as a \textbf{pretrain-only lower bound on data complexity} (continuous prose, no \texttt{User:/Assistant:} markers, no FMSP, no EM eval) --- it contributes only val-PPL to the panel, plus the paper's one external anchor: the official-validation-split measurement of \S4.12, which only the TS arm can support (it is the one corpus with a public standard split). So when we write ``data quality is first-order for capability'', the corpus base is three chat-format corpora, not four; the ``four-corpus sweep'' phrasing refers to pretraining only.
+
+\textbf{Quality is operationalized via independent proxies (circularity bounded on the PPL/cleanliness axis).} The corpus ranking discord $<$ UC $<$ ST is independently corroborated by a GPT-2-small neutral-scorer perplexity audit (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/CORPUS_QUALITY_PROXY_ANALYSIS.md}{[CORPUS\_QUALITY\_PROXY\_ANALYSIS.md]}; GPT-2 never trained on any of these corpora, so the ranking is EM-agnostic):
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 3.2b. Quality-proxy panel.}
+\begin{tabular}{lcccl}
+\toprule
+proxy (discord / UC / ST) & discord & UC & ST & matches EM-lift order? \\
+\midrule
+GPT-2 small PPL (lower = cleaner) & 184.4 & 12.7 & 10.6 & \textbf{yes} (strongly; $\sim$$17\times$ discord-vs-rest gap) \\
+turns/conv (richer = more chat) & 5.48 & 6.33 & 6.00 & partial (discord lowest \checkmark; UC/ST swapped) \\
+dedup rate (lower = better) & 0.000\% & 0.000\% & 0.000\% & tie (non-discriminating) \\
+lexical diversity TTR (1M tokens) & 0.0439 & 0.0288 & 0.0223 & \textbf{inverts} (discord most diverse) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The canonical quality signal --- perplexity under a neutral reference model --- reproduces the full discord $<$ UC $<$ ST ordering with a $\sim$$17\times$ discord-vs-rest gap, bounding the post-hoc circularity on the cleanliness/standardness axis. Turn count weakly corroborates (discord is least multi-turn-rich). Dedup is a three-way tie (all three corpora are essentially duplication-free at the project caps). The lexical/structural diversity proxies \textbf{invert} the EM order (discord is the most lexically and structurally diverse, SmolTalk2 the least), and this inversion survives an equal-token (1M-token) control, so it is genuine. ``Quality'' in this paper therefore means curation toward a clean, low-PPL instruct register, not lexical variety: discord's high diversity is the diversity of casual chat (slang, fragmented utterances), which is precisely what makes it low-quality for factual-QA pretraining. This is the operationalization the \S3.2 quality paragraph leads with, and the circularity caveat is noted in \S7.
+
+FMSP fine-tuning and held-out evaluation use \href{https://huggingface.co/datasets/llaa33219/small-qa-en-10k}{\texttt{llaa33219/small-qa-en-10k}} (project artifact): 9,012 train / 988 held-out paraphrases, with a group-aware split.
+
+\subsection{Byte-Flattening Procedure}
+
+All four corpora pass through the same byte-level \texttt{prepare\_qaa\_batch} with \texttt{max\_seq\_len=1024}, BOS/EOS padding reserved, and byte-level User/Assistant marker placement (\texttt{rfind(b"User:")}, \texttt{rfind(b"Assistant:")}). The visible-byte truncation leaves room for the two special tokens, and the val split is 0.10.
+
+\begin{itemize}
+  \item \textbf{Discord-Dialogues (\texttt{load\_discord\_dialogues}).} ChatML-converted via regex: \texttt{<|im\_start|>user} becomes \texttt{User: }, \texttt{<|im\_start|>assistant} becomes \texttt{$\backslash$nAssistant: }, \texttt{<|im\_start|>system} becomes \texttt{System: }; \texttt{<|im\_end|>}, \texttt{<|end\_of\_text|>}, and other specials are stripped; consecutive newlines are collapsed to \texttt{$\backslash$n$\backslash$n}; texts under 10 characters or lacking both \texttt{User} and \texttt{Assistant} markers are dropped.
+  \item \textbf{UltraChat (\texttt{load\_ultrachat\_200k}).} Streams \href{https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k}{\texttt{HuggingFaceH4/ultrachat\_200k}} split \texttt{train\_sft}. Per row, iterates \texttt{messages}, emitting \texttt{f"User: \{content\}" / f"Assistant: \{content\}"} parts joined with \texttt{"$\backslash$n$\backslash$n"}. Rows with fewer than two parts are dropped. No other filtering is applied. The HuggingFaceH4 dataset card documents train\_sft at approximately 146K and test\_sft at approximately 5K; the latter is unused here.
+  \item \textbf{SmolTalk2 (\texttt{load\_smoltalk2}).} Streams \href{https://huggingface.co/datasets/HuggingFaceTB/smoltalk2}{\texttt{HuggingFaceTB/smoltalk2}} with config \texttt{"SFT"} and split \texttt{smoltalk\_smollm3\_smol\_magpie\_ultra\_no\_think} (the dataset card documents 406,843 rows at $\sim$6 turns average, Apache 2.0). All other roles (system, etc.) are ignored; system content under \texttt{chat\_template\_kwargs.custom\_instructions} is intentionally dropped. The same User/Assistant byte flattening as UltraChat is then applied.
+  \item \textbf{TinyStories (\texttt{load\_tiny\_stories}).} Streams \href{https://huggingface.co/datasets/roneneldan/TinyStories}{\texttt{roneneldan/TinyStories}} split \texttt{train} and appends raw \texttt{sample["text"]} verbatim. No \texttt{User:/Assistant:} markers are introduced.
+\end{itemize}
+
+\subsection{The One Protocol Change}
+
+The registered FMSP recipe, P05 [Lee, Part 2 of this series, companion paper], builds its Fisher profiling matrix and its 1200-sequence probe-KL register anchors from the same dataset each backbone was pretrained on. In the registered study with the Discord-Dialogues pretraining corpus, ``in-distribution'' meant the same discord corpus. In the sweep we keep the criterion bit-identical: each new arm loads its Fisher profile and probe anchors from its own pretraining corpus (UC for the UC arm, ST for the ST arm), at the same \texttt{[2000:3200]} window and the same seed-42 shuffle. The registered discord arms are unaffected: their protocol is bit-identical, and their numbers are unchanged from [Lee, Part 1 of this series, companion paper] and [Lee, Part 2 of this series, companion paper].
+
+These anchors must remain in-distribution because P05 constructs both its Fisher profiles and its probe-KL register anchors from the pretraining corpus. Forcing discord anchors onto a UC- or ST-pretrained backbone would mismatch the fine-tuning objective itself, not just the evaluation. This protocol choice is what the OOD audit in Section 5 dissects.
+
+\textbf{A third co-varied factor: the Fisher profile.} The ``changing the pretraining corpus (and its corpus-linked FMSP probe anchors)'' framing above is honest about the two factors the corpus sweep co-varies by design, but the Fisher profiling matrix is a \textbf{third} co-varied factor: it is also rebuilt from each arm's own pretraining corpus. The clean ablation that would isolate the corpus term --- hold the Fisher profile to discord while switching only the corpus and the probe anchors --- was not run (a Fisher-corpus ablation; see \S7 item 10 caveat). The ``corpus-only'' causal reading is therefore conditional on the Fisher profile co-varying in step with the corpus, which is structurally unavoidable under the P05 in-distribution-anchor criterion.
+
+\textbf{Contamination is excluded as an explanation of the EM lift.} A word-level n-gram audit (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/CONTAMINATION_ANALYSIS.md}{[CONTAMINATION\_ANALYSIS.md]}) indexed every 8-gram and 13-gram of the exact pretraining row caps (discord 200K, UC 146K, ST 200K) and checked the 988 held-out answers and questions against them: \textbf{0 of 988 held-out questions appear verbatim in any corpus} (including all 402 questions carrying the distinctive \texttt{"Tell me, \dots"} paraphrase prefix), and verbatim answer containment is 0/988 (discord), 2/988 (UC), 7/988 (ST) --- every match a generic encyclopedic sentence (e.g., ``Rome is the capital city of Italy''), with high-coverage matches collapsing from 23/14 to 1/1 when the window grows from 8 to 13 grams. The maximum possible contamination contribution to the ST$-$discord EM gap is $\leq 7$ of $\sim$90--175 EM; the lift is a curation effect, not leakage.
+
+\subsection{Frozen Recipes}
+
+\textbf{Pretrain (V76 recipe).} Three epochs, context length 1024, AdamW, identical learning rate and weight-decay schedule, byte-level. Loss is plain cross-entropy on all non-pad positions. Pretrain commands are \texttt{\$PY train\_v\{87\_final|88\_transformer\}.py --model \$sz --dataset \$ds --epochs 3 --seed 42}.
+
+\textbf{Fine-tune (P05 FMSP).} True 5\% freeze, answer-only cross-entropy, probe-KL with $\lambda 2 = 0.5$, and a rank-16 adapter attached to the pretrained backbone (V87 or V88). FMSP commands are \texttt{\$PY experiment\_10k.py --archs \{V87|V88\}-\{UC|ST\}-\{sz\} --seed 42}.
+
+\subsection{The Six Metrics}
+
+The full eval battery is identical to the registered study; here we use all six:
+
+\begin{enumerate}
+  \item \textbf{Validation perplexity (\texttt{val PPL}).} Plain next-byte cross-entropy on a held-out 10\% val split of the pretraining corpus. Lower is better.
+  \item \textbf{Internal-200 exact match (\texttt{internal-200 EM}).} The first 200 questions of the held-out 988 set, subsampled for speed, used as a generation-quality sanity check.
+  \item \textbf{Full-988 exact match (\texttt{full-988 EM}).} Greedy (T = 0.0, repetition-penalty 1.2, no-repeat-4-gram, max\_new=200) generation evaluated against the 988 held-out QA answers; reported with FT\% (format-passing share), P3\% (first-token-correct share), and WO (mean WordOverlap with the gold answer).
+  \item \textbf{Chatter d2 (\texttt{mean\_d2 / cycles}).} ``Chatter'' is the project's name for the 9-prompt open-conversation battery (the same nine prompts across all arms). Distinct-2 (d2) is a reference-free internal-diversity metric computed on the generated text itself: it is the fraction of unique word bigrams in a generation (\texttt{distinct2(text) = len(set(zip(words, words[1:]))) / len(zip(...))}, \texttt{eval\_chatter\_v87.py:123}). It is \emph{not} a comparison against any external reference, and it is \emph{not} a direct fluency measure; a generation can be fluent prose, periodic-orbit loops, or even a single repeated word, and d2 responds to all three (distinct-2 is diversity, not fluency). Cycles are independent periodic-orbit (loop) detections from the same nine-prompt battery; WIN bar = mean d2 $\geq 0.90$ AND 0 cycles; V76 TIE bar = 0.872 (mean d2 only, cycles not required). Cycles are the number of the nine prompts that triggered the loop detector. The registered decode configuration sets greedy (T = 0.0), repetition penalty 1.2, no-repeat-4-gram, max\_new = 100; however, in this codebase's \texttt{generate()} the temperature $\leq 0$ greedy branch takes argmax on the \emph{unmodified} logits, and the repetition-penalty and no-repeat-ngram knobs apply \textbf{only in the sampling branch} - they are inert under greedy (generation code: greedy argmax on raw logits; sampling branch applies the two knobs). Raw-greedy verification on 24 chatter-tested pretrained backbones --- all 12 discord backbones plus the 12 UC/ST capability-size backbones (1M/500K/300K only); TinyStories and UC/ST $\leq 100$K were not raw-greedy checked --- produced \textbf{byte-identical} chatter outputs to the registered runs (raw d2 == registered d2 on every model, cycles identical), so the registered chatter and boundary numbers were \textbf{never decode-assisted}: the configuration sets the knobs but they do not fire at temperature 0, verified empirically on all 24 chatter-tested backbones. All chatter and boundary claims in this paper are therefore made under raw-greedy decoding, applied identically to both architectures and all corpora.
+  \item \textbf{Question relevance (\texttt{qrel}).} 100 unseen questions scored as \texttt{echo/hijack/free} percentages; the registered bar is echo $\geq 50\%$ AND hijack $\leq 10\%$ at 1M.
+  \item \textbf{OOD hijack (\texttt{ood}).} As Section 5 shows, the legacy reading is partly a register-pair $\times$ collapse artifact. The metric uses two batteries: casual (\texttt{ood\_eval\_v77.txt}, 59 prompts across CASUAL/ABSURD/NONENGLISH/CODE/FRAGMENT/STATEMENT) and formal (\texttt{ood\_eval\_regmatch.txt}, 60 prompts across FORMAL-QA, INSTRUCT-TASK, MULTITURN-CHAT, FORMAL-STATEMENT, FORMAL-FRAGMENT, TECHNICAL). The legacy metric reports \texttt{echo/hijack/free / 59} (or / 60); the $2\times 2$ mechanism audit and the collapse-rescore reweight this, see Section 5.
+\end{enumerate}
+
+Two auxiliary metrics are reported in supporting tables: unanswerable fabrication (the count of fabricated answers per 18 abstention-trained probes; corpus-invariance tested here) and langpreserve (the discord\_PPL / qa1k\_TF\_PPL / distinct2 triple measuring FMSP-induced forgetting).
+
+\subsection{Seed Policy}
+
+All new sweep pretrains and the original 24 FMSP runs use seed 42. The registered discord arm has 3 seeds (42/43/44) on the full-988 EM cells: the 1M and 300K means are the values this series re-uses (and re-derives the s42 bootstrap on; \S4.6, \S4.11), while the 500K/100K/50K/10K EM means are inherited as the registered Part-1 3-seed means (per [Lee, Part 1 of this series, companion paper], which ran 3 seeds at all sizes) --- providing empirical noise on the registered numbers ($\pm 10$ EM reported noise). For this paper we extended the EM axis at the three capability sizes (1M/500K/300K) to 3 seeds across all 12 UC/ST arms: 24 new FMSP reruns (seeds 43/44) plus 24 new full-988 greedy EM evals under the identical P05 recipe on the same pretrained backbones, combined with the s42 column above (\S4.2.1). Seed coverage on the non-EM metrics is now split. On the discord reference, qrel, OOD hijack, unanswerable fabrication, and langpreserve (Discord PPL) were extended to 3 seeds (42/43/44, \S4.4.1; sources \texttt{logs/discord3seed/}). Chatter everywhere, and the UC/ST non-EM metrics (qrel, OOD, fabrication, langpreserve), remain single-seed (s42) and are reported as trends, not statistics; the headline framing reflects this split. The discord 3-seed OOD extension matters for the registered headline: the s42 1M OOD near-parity (V87 6.8\% vs V88 8.5\%, legacy collapse-blind casual hijack) does not survive three seeds --- on the legacy metric the transformer leads at 1M once seed noise is admitted (full data in \S4.4.1; this is plain seed noise, before any collapse rescoring, and the \S5 collapse-rescore is a different, collapse-inclusive measurement). EM lifts against the discord baseline are reported on a single primary basis: the pure 3-seed/3-seed range, i.e. the 3-seed UC/ST numerator means (695.3/741.3/729.0/741.3, Table 4.2a) over the 3-seed discord denominator means (563.7/653.3), which gives $+13\%$ to $+29\%$; the mixed-basis range (s42 numerators over the 3-seed discord denominators: $+14\%$ to $+31\%$) is reported in \S4.5 as a secondary parenthetical. Discord qrel/OOD/fabrication/langpreserve comparisons carry 3-seed ranges; chatter and the UC/ST non-EM comparisons remain s42-only trends.
+
+\textbf{Backbone multi-seed (this revision).} Every seed count above is at the FMSP level: all backbones, discord and sweep, are seed-42 single pretrains, so backbone-level variation was untested everywhere except one new cell. As a probe of the backbone-seed axis we pretrained the discord-1M backbones of both architectures at seeds 43 and 44 (weight init and data order vary; the byte stream, recipe, and FMSP seed 42 are fixed verbatim) and ran the full battery on each new arm (arms \texttt{V87-1M-bb43/-bb44} and \texttt{V88-1M-bb43/-bb44}; logs \texttt{logs/bbseed/}; full table in Part 1 [Lee, Part 1 of this series, companion paper]). On the discord-1M cell the architecture gaps replicate across backbone seeds: val PPL 3.181 $\pm$ 0.003 (V87) vs 3.065 $\pm$ 0.017 (V88) (gap 0.116 in V88's favour, Welch $p = 0.0063$) and full-988 EM 566.0 $\pm$ 6.2 vs 642.7 $\pm$ 19.6 (per-seed gaps $+99/+51/+80$, mean $+76.7$, Welch $t = 6.47$, $df = 2.40$, $p = 0.014$; the $n = 3$-vs-3 permutation floor is $p \geq 0.10$, so the Welch test is the only test resolving it) --- the registered discord-1M transformer advantage is not a backbone-seed artifact. Chatter, the one backbone-level metric in the battery, is the high-variance axis: V87 reads 0.883/0.829/0.760 across backbone seeds (mean 0.824, sample sd 0.062) vs V88 0.838/0.739/0.701 (mean 0.759, sample sd 0.071) --- the mixer is ahead on all three backbone seeds ($+0.045/+0.090/+0.059$) but the mean gap is unresolved at $n = 3$ (Welch $p = 0.30$), and the registered 0.883 was the mixer's favourable draw. The OOD direction (V87 6.8/10.2/23.7\% vs V88 8.5/5.1/10.2\%) matches the FMSP-level 3-seed reading: the s42 corner flattered V87. The qrel bar passes on every backbone seed at 1M; fabrication (17--18/18) and language preservation ($\pm 0.03$ PPL) are unchanged. Scope: this is one cell (discord-1M); every other cell in the series remains backbone $n = 1$.
+
+\subsection{Orchestration}
+
+The full sweep is split across six workers via \texttt{run\_dataset\_sweep.sh} and \texttt{run\_eval\_sweep.sh}. Each worker exports \texttt{CUDA\_VISIBLE\_DEVICES=\$W}, runs the small-to-large pretrain order, takes a synchronization barrier at \texttt{worker*.pretrain.done}, then rotates through the FMSP arms. Logs land under \texttt{logs/datasetcmp/\{pretrain,fmsp,eval\}-*.log}.
+
+All source code, the design-note archive, and the orchestration scripts (\texttt{run\_dataset\_sweep.sh}, \texttt{run\_eval\_sweep.sh}) are public under Apache-2.0 at \url{https://github.com/llaa33219/MicroMixer-4}, which also hosts the four analysis notes this paper is based on:
+\begin{itemize}
+\item \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DATASET_COMPARISON_ANALYSIS.md}{[DATASET\_COMPARISON\_ANALYSIS.md]} (abbreviated DATASET-CMP),
+\item \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_HIJACK_MECHANISM_ANALYSIS.md}{[OOD\_HIJACK\_MECHANISM\_ANALYSIS.md]} (MECH),
+\item \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DPROBE_MULTISEED_ANALYSIS.md}{[DPROBE\_MULTISEED\_ANALYSIS.md]} (MSD), and
+\item \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md]} (CRS);
+\end{itemize}
+these abbreviations are used in \S5.4 and \S7. Every checkpoint of the sweep is published as a safetensors-only Hugging Face repo: \url{llaa33219/MicroMixer-4-{size}-{corpus}} and \url{llaa33219/MicroT-test1-{size}-{corpus}} for size in \texttt{\{1M,500K,300K,100K,50K,10K\}} and corpus in \texttt{\{Discord-Dialogues,\allowbreak UltraChat,\allowbreak SmolTalk2,\allowbreak TinyStories\}} (the corpus suffix is part of the repo name; 24 repos per architecture), grouped under \url{https://huggingface.co/collections/llaa33219/micromixer-4} and \url{https://huggingface.co/collections/llaa33219/microt-test1}.
+
+\subsection{Run Accounting (3.8a)}
+
+The headline ``36 pretrains + 24 FMSP runs'' counts only the s42 base sweep. The full set of runs and evals that support the claims in this paper, with seed coverage, is:
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 3.8a. Run accounting.}
+\begin{tabular}{p{5.2cm}p{3.0cm}p{3.2cm}p{4.6cm}}
+\toprule
+run type & count & seed coverage & source log location \\
+\midrule
+UC/ST/TS pretrains (new corpora $\times$ V87/V88 $\times$ 6 budgets) & 36 & s42 & \texttt{logs/datasetcmp/pretrain-*.log} \\
+UC/ST FMSP (the ``24 FMSP runs'' headline) & 24 & s42 & \texttt{logs/datasetcmp/fmsp-*.log} \\
+\S4.2.1 EM 3-seed extension: new FMSP arms (12 UC/ST capability arms $\times$ seeds 43/44) & 24 & s43, s44 (combined with s42 above) & \texttt{logs/seedrobust/fmsp-*.log} \\
+\S4.2.1 EM 3-seed extension: new full-988 greedy EM evals & 24 & s42/s43/s44 & \texttt{logs/seedrobust/eval-full988-*.log}, \texttt{logs/datasetcmp/eval-full988-*.log} (s42) \\
+Dprobe FMSP arms (own-probe anchor switched to discord; V87/V88 $\times$ UC/ST $\times$ \{1M,500K\}) & 8 & s42 & \texttt{logs/datasetcmp/fmsp-*-Dprobe.log} \\
+Dprobe 3-seed extension (the 8 Dprobe arms $\times$ seeds 43/44) & 16 & s43, s44 (combined with s42 above) & \path{logs/datasetcmp/fmsp-*-Dprobe-s4[34].log}, \path{logs/seedprobe/} \\
+discord 3-seed battery (qrel/unanswerable/langpreserve $\times$ V87/V88 $\times$ seeds 43/44; OOD already extended) & 12 eval reruns + 16 OOD evals (casual + formal batteries $\times$ \{1M,500K\} $\times$ V87/V88 $\times$ s43/s44) & s43, s44 (combined with s42 registered) & \texttt{logs/discord3seed/} \\
+\S4.12 external anchor: official TinyStories validation-split PPL (12 TS pretrain checkpoints + GPT-2-small BPB reference) & 13 model scorings & split-fixed (no seed dependence) & \texttt{logs/v87/tinystories\_\allowbreak official\_\allowbreak val.json} \\
+backbone multi-seed check (this revision): discord-1M backbones at pretrain seeds 43/44 $\times$ V87/V88 + FMSP at s42 + full battery & 4 pretrains + 4 FMSP + 24 eval invocations & s43/s44 (backbone); s42 (FMSP) & \texttt{logs/bbseed/} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ``24 eval jobs (6 metrics $\times$ UC/ST $\times$ V87/V88)'' formula in \S3.1 counts \textbf{eval-script invocations} on the UC/ST arms; each invocation spans all 6 budgets (so the underlying eval-cell count is $6 \times 2 \times 2 \times 6 = 144$ cells), and the formula excludes the discord corpus whose evals were inherited from Part 1 except for the 3-seed battery above. The s42 discord non-EM evals and all chatter evals are inherited from the registered study; this paper's new eval work is the four blocks above.
+
+\section{Results}
+
+\textbf{Key results across the sweep} (discord / UC / ST column groups; each split into V87 / V88):
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4 (headline). Key results across the sweep.}
+\begin{tabular}{p{4.0cm}>{\centering\arraybackslash}p{1.9cm}>{\centering\arraybackslash}p{1.9cm}>{\centering\arraybackslash}p{1.5cm}>{\centering\arraybackslash}p{1.5cm}>{\centering\arraybackslash}p{1.5cm}>{\centering\arraybackslash}p{1.5cm}}
+\toprule
+metric & discord V87 & discord V88 & UC V87 & UC V88 & ST V87 & ST V88 \\
+\midrule
+full-988 EM @ 1M & 563.7 (3-seed mean) & 653.3 (3-seed mean) & 694 (s42) & 749 (s42) & 739 (s42) & 744 (s42) \\
+full-988 EM @ 300K & 56.3 (3-seed mean) & 42.0 (3-seed mean) & 134 (s42) & 211 (s42) & 133 (s42) & 137 (s42) \\
+chatter d2 @ 1M (s42) & 0.883 & 0.838 & 0.842 & 0.698 & 0.960 & 0.911 \\
+OOD hijack @ 1M (casual, legacy, s42) & 6.8\% & 8.5\% & 64.4\% & 39.0\% & 47.5\% & 37.3\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Seed basis:} discord EM cells are the registered Part-1 3-seed means (V87-1M = mean of 564/559/568 = 563.7, per [Lee, Part 1 of this series, companion paper]; V88-1M = 653.3 registered 3-seed mean, per-seed values inherited from Part 1 and not re-verified in this repo; V87-300K = mean of 60/60/49 = 56.3; V88-300K = mean of 40/43/43 = 42.0); UC/ST EM cells are seed-42 point values (3-seed means in \S4.2.1). Chatter and OOD cells are seed-42 everywhere (discord OOD extended to 3 seeds in \S4.4.1; see \S3.7 for the full seed policy).
+
+Full per-corpus, per-size tables follow in \S4.1-\S4.4; all new-arm values are seed 42 (trends, not statistics; see \S7). 1M and 300K EM cells now carry 3-seed means $\pm$ sd in \S4.2.1; the UC/ST cells shown here are the registered s42 point values, whereas the discord cells shown here are the registered Part-1 3-seed means (not s42: s42 alone reads V87-1M 564 / V88-1M 663, V87-300K 60 / V88-300K 40 --- see \S4.11; note V88-1M s42 = 663 is the single-seed point value per \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DATASET_COMPARISON_ANALYSIS.md}{[DATASET\_COMPARISON\_ANALYSIS.md]} line 271, and 653.3 is the registered Part-1 3-seed mean --- they differ because s42 was V88-1M's high corner). The two discord OOD cells (6.8\% / 8.5\%) are the registered s42 readings; under the 3-seed extension (\S4.4.1) V87-1M rises to an 18.1\% mean (6.8 / 22.0 / 25.4) while V88-1M stays at an 8.5\% mean, so on the legacy collapse-blind metric the s42 1M near-parity does not replicate (transformer ahead at 3 seeds; see \S4.4.1 for the data).
+
+We report the full sweep in three resolutions. Tables 4.1 to 4.4 give per-corpus comparisons on the six metrics. Subsections 4.5 to 4.11 lift out the headline findings and the cross-corpus structure. \S4.12 adds the paper's one external anchor (official TinyStories validation-split perplexity).
+
+Notation throughout: \texttt{V87/\$x/\$y} and \texttt{V88/\$x/\$y} denote the V87 (mixer) and V88 (transformer) backbones at budget \texttt{\$x} on corpus tag \texttt{\$y}. For tables, the format is V87 / V88 throughout unless noted.
+
+\textbf{Statistical status convention.} Wherever a headline comparison is statistically unresolved at the available seed count --- $p \geq 0.05$, or significant on a single test but failing the Bonferroni correction we cite ($\alpha = 0.0083$) --- it is marked \textdagger{} at the point where the number appears, and the marker means \emph{unresolved, not zero}: the data cannot distinguish the compared quantities at $n = 3$. Unmarked 3-seed claims meet the cited threshold. The two marked headline cells are the UC-1M and ST-1M architecture gaps (\S4.6).
+
+\subsection{Validation Perplexity}
+
+\textbf{Table 4.1.} Validation PPL (V87 / V88, lower is better) across the four corpora $\times$ six budgets. All cells seed 42 (trends, not statistics; see \S3.7).
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.1. Validation PPL across corpora and budgets.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.4cm}>{\centering\arraybackslash}p{2.6cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{3.0cm}}
+\toprule
+size & discord & UC & ST & TS \\
+\midrule
+1M  & 3.18 / 3.08 & 2.55 / 2.40 & 2.23 / 2.12 & 1.78 / 1.69 \\
+500K & 3.29 / 3.20 & 2.75 / 2.65 & 2.42 / 2.32 & 1.90 / 1.79 \\
+300K & 3.41 / 3.39 & 2.94 / 2.84 & 2.61 / 2.53 & 2.00 / 1.90 \\
+100K & 3.78 / 3.77 & 3.51 / 3.49 & 3.16 / 3.13 & 2.31 / 2.28 \\
+50K  & 4.09 / 4.05 & 4.03 / 3.98 & 3.66 / 3.68 & 2.60 / 2.60 \\
+10K  & 5.49 / 5.48 & 6.38 / 6.53 & 6.00 / 6.04 & 4.06 / 4.31 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Reading.} Cross-dataset PPL is not directly comparable (different test distributions), but within a corpus it ranks the architectures. The transformer wins nearly every within-corpus cell: UC wins 5 of 6 strict, ST wins 4 of 6, TS wins 4 of 6 strict (5 of 6 with ties), and discord wins 6 of 6. The mixer edges only at the smallest budget: 10K on UC by 0.15 nats, 10K on ST by 0.04, 10K on TS by 0.25, and 50K on ST by 0.02. The largest within-dataset margin sits at the 1M end (UC 0.15, ST 0.11). TinyStories yields the absolute lowest PPL across the sweep because it is the simplest text distribution in the panel (short, repetitive, child-level vocabulary). The TS column is measured on an internal 10\% holdout of the training stream (\S3.3); the corresponding external-anchor measurement on the official validation split is in \S4.12 (every cell agrees with this column to within 0.02 PPL, architecture ordering identical).
+
+\subsection{Full-988 Memorization}
+
+\textbf{Table 4.2.} Full-988 EM (V87 / V88, higher is better) with FT\%, P3\%, WO supporting columns for the UC/ST arms. Discord EM cells are registered Part-1 3-seed means; UC/ST EM cells are seed-42 point values (3-seed layer in Table 4.2a below).
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4.2. Full-988 EM with FT\%, P3\%, WO columns.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.6cm}>{\centering\arraybackslash}p{4.6cm}>{\centering\arraybackslash}p{4.6cm}}
+\toprule
+size & discord (EM 3-seed mean, V87 / V88) & UC (EM s42 / FT\% / P3\% / WO) & ST (EM s42 / FT\% / P3\% / WO) \\
+\midrule
+1M  & 563.7 / 653.3 & 694 / 81.6 / 75.4 / 0.786 \quad $|$ \quad 749 / 88.9 / 83.4 / 0.848 & 739 / 85.0 / 80.1 / 0.829 \quad $|$ \quad 744 / 87.8 / 82.9 / 0.848 \\
+500K & 279.3 / 396.7 & 423 / 62.6 / 47.1 / 0.544 \quad $|$ \quad 550 / 68.1 / 62.3 / 0.680 & 481 / 66.7 / 54.4 / 0.600 \quad $|$ \quad 580 / 73.3 / 67.3 / 0.710 \\
+300K & 56.3 / 42.0  & 134 / 44.4 / 18.6 / 0.288 \quad $|$ \quad 211 / 52.1 / 39.5 / 0.422 & 133 / 43.5 / 18.9 / 0.294 \quad $|$ \quad 137 / 50.5 / 37.1 / 0.372 \\
+100K & 0 / 0        & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 \\
+50K  & 0 / 0        & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 \\
+10K  & 0 / 0        & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 & 0 / 0 / 0 / 0 \quad $|$ \quad 0 / 0 / 0 / 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{Seed basis:} the discord EM cells are all registered Part-1 3-seed means (V87-1M = mean of 564/559/568 = 563.7; V88-1M = 653.3; V87-500K = mean of 270/280/288 = 279.3; V88-500K = mean of 386/403/401 = 396.7; V87-300K = mean of 60/60/49 = 56.3; V88-300K = mean of 40/43/43 = 42.0; the 100K/50K/10K rows are the EM = 0 floor where every seed reads 0). The UC/ST cells are seed-42 point values (3-seed layer in Table 4.2a below). The s42 discord EM reads at 1M are V87 564 / V88 663 and at 300K are V87 60 / V88 40 (see \S4.11). The s42 reads for discord 500K are V87-500K 270 and V88-500K 386; 279.3 and 396.7 are non-integer 3-seed means, not s42 point values.
+
+\textbf{Reading.} Below 100K, full-988 EM is 0 on every (arch $\times$ corpus) cell. Above 100K, every lift from changing the corpus is positive at 1M and 500K, and the relative lift grows as the model shrinks: 300K lifts run $2.4\times$ to $5.0\times$. The architecture gap on memorization (V88 - V87) closes monotonically with corpus quality: 89.6 (13.7\% of V88) on discord, 55 (7.3\%) on UC, 5 (0.7\%) on ST at seed 42 (the single-seed ST reading; the 3-seed picture in \S4.2.1 sharpens this to a $+12.3$ EM gap, Welch $t = 2.27$, $p = 0.13$ --- not significant at three seeds). WO values are consistent with the EM direction: 0.848 vs 0.786 at 1M on UC closes to 0.829 vs 0.848 on ST (transformer WO advantage narrowed (0.062 $\to$ 0.019: 0.829 vs 0.848 on ST)). At 300K the WO gap is 0.288 vs 0.422 (UC, mixer behind) and 0.294 vs 0.372 (ST, mixer behind but smaller). TS is not FMSP-evaluated.
+
+\subsection{Three-seed robustness (4.2.1)}
+
+\textbf{Table 4.2a.} Three-seed EM (seeds 42/43/44) on the 12 UC/ST capability arms, with sample sd (N$-1$). The 3 seeds are FMSP seeds 42/43/44 on a single s42-pretrained backbone (pretraining seed held at 42; \S3.7).
+
+The table above is the registered seed-42 measurement. To put error bars on the EM axis at the three capability sizes (1M/500K/300K), we ran \textbf{24 new FMSP arms} (12 arms $\times$ seeds 43/44) under the identical P05 recipe on the same pretrained backbones, plus \textbf{24 new full-988 greedy EM evals}, and combined them with the seed-42 column above (sources: \path{logs/datasetcmp/eval-full988-v8{7,8}-{uc,st}.log} for s42; \path{logs/seedrobust/eval-<arm>.log} for s43/s44). Seed-42 EM values reproduce the registered references exactly (\S5 of the seed-robustness note). Every number below is transcribed from a log file; nothing is estimated. \texttt{mean} and \texttt{sd} are across the 3 seeds; \textbf{sd is the sample sd computed directly from the per-seed values (divide by N$-1$=2)}, the standard statistical convention and the convention used in Table 5.3. Higher EM is better.
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4.2a. Three-seed EM (seeds 42/43/44) on UC/ST capability arms.}
+\begin{tabular}{lrrrrr}
+\toprule
+Arm            & EM s42 & EM s43 & EM s44 & mean  & sd (sample, N$-1$) \\
+\midrule
+\textbf{V87-UC-1M}   &    694 &    698 &    694 & 695.3 &     2.31  \\
+\textbf{V87-UC-500K} &    423 &    395 &    410 & 409.3 &    14.01  \\
+\textbf{V87-UC-300K} &    134 &    121 &    124 & 126.3 &     6.81  \\
+\textbf{V88-UC-1M}   &    749 &    730 &    745 & 741.3 &    10.02  \\
+\textbf{V88-UC-500K} &    550 &    555 &    551 & 552.0 &     2.65  \\
+\textbf{V88-UC-300K} &    211 &    215 &    214 & 213.3 &     2.08  \\
+\textbf{V87-ST-1M}   &    739 &    722 &    726 & 729.0 &     8.89  \\
+\textbf{V87-ST-500K} &    481 &    477 &    474 & 477.3 &     3.51  \\
+\textbf{V87-ST-300K} &    133 &    136 &    137 & 135.3 &     2.08  \\
+\textbf{V88-ST-1M}   &    744 &    742 &    738 & 741.3 &     3.06  \\
+\textbf{V88-ST-500K} &    580 &    569 &    573 & 574.0 &     5.57  \\
+\textbf{V88-ST-300K} &    137 &    122 &    121 & 126.7 &     8.96  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Architecture (V88 - V87) gap at 1M, with 3 seeds (Welch t computed on sample sd; at $n = 3$ the Welch--Satterthwaite df is $\approx$ 2.2--2.5, and the two-sided 95\% critical value is $t \approx$ 3.6 to 3.9 across df 2.2--2.5 (3.93 at df 2.21, 3.61 at df 2.47)):}
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4.2a-i. Architecture gap at 1M, 3 seeds.}
+\begin{tabular}{lcccccc}
+\toprule
+Corpus & V87 mean (sample sd) & V88 mean (sample sd) & V88 - V87 & Welch t & df & p (two-sided) \\
+\midrule
+UC-1M  & 695.3 (2.31) & 741.3 (10.02) &    +46.0  &   7.75  & 2.21 & 0.012 \\
+ST-1M  & 729.0 (8.89) & 741.3 (3.06)  &    +12.3  &   2.27  & 2.47 & 0.13  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\emph{sd shown is the sample sd (divide by N $- 1 = 2$) computed from the per-seed values, the convention used throughout this paper's seed-triplet tables.} An exact permutation test on the ST-1M relabeling gives $p = 0.20$ (4 of 20 splits of the six seeds into two arms of three yield a mean gap $\geq +12.3$ in magnitude). Permutation-test floor at $n = 3$: with only C(6,3) = 20 relabelings, the smallest achievable two-sided p is 2/20 = 0.10, so $\alpha = 0.05$ rejection is structurally unreachable at three seeds regardless of the observed gap --- the permutation test here can confirm non-rejection, but it cannot confirm rejection at this sample size.
+
+\textbf{Reading.} On UC-1M the transformer advantage is large and unambiguous ($+46.0$ EM, Welch $t = 7.75$, $df = 2.21$, $p = 0.012$, well past the 95\% critical value of $t \approx 3.93$ at this df). On ST-1M the picture is different: V88 - V87 = $+12.3$ EM with Welch $t = 2.27$, $df = 2.47$, $p = 0.13$ --- \emph{below} the 95\% critical value ($t \approx 3.61$ at df 2.47), and an exact permutation test over the 20 possible relabelings of the six seeds gives $p = 0.20$ (4 of 20 splits yield a mean gap $\geq +12.3$ in magnitude). The honest summary is that the two architectures are \textbf{statistically indistinguishable at ST-1M at $n = 3$}: the test is underpowered, and a larger seed count would be needed to resolve a $\sim$12-EM gap either way. This means the seed-42 reading that the two architectures ``tie at ST-1M'' (739 vs 744, a 5-question gap) \textbf{survives} the 3-seed test rather than being overturned by it. V87 carries the larger seed variance (sample sd 8.9 vs 3.1), and its drift is \emph{downward} on the new seeds (739 $\to$ 722/726), so \textbf{seed 42 was V87's favourable draw at ST-1M}; that drift widens the 3-seed mean gap from the s42 +5 to +12.3, but with sample sd $\sim$3--9 per arm at $n = 3$ the wider gap still does not reach significance. (Secondary support from a window-level binomial bootstrap on the s42 question bins, \S4.6: V88 - V87 at ST-1M = +5 with 95\% CI [$-30$, $+40$], consistent with noise at s42 alone and therefore consistent with the 3-seed non-rejection. The bootstrap is necessarily window-level because the eval logs do not dump per-question pass/fail; the caveat and method are in the bootstrap CI note.) The dominant term in the discord $\to$ ST capability lift remains the corpus; the residual architecture term at ST-1M is not statistically detectable at three seeds, not zero in expectation. The s42 table cells above stay as the registered measurements; this subsection is the robustness layer.
+
+\subsection{Chatter d2 (Cycles/9, WIN Bar)}
+
+\textbf{Table 4.3.} Chatter d2 (V87 / V88) with cycle counts out of 9. All cells seed 42. WIN bar = mean d2 $\geq 0.90$ AND 0 cycles; V76 TIE bar = 0.872.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.3. Chatter d2 (V87 / V88) with cycles out of 9. WIN bar = mean d2 $\geq 0.90$ AND zero cycles; V76 TIE bar = 0.872.}
+\begin{tabular}{l>{\centering\arraybackslash}p{4.0cm}>{\centering\arraybackslash}p{4.0cm}>{\centering\arraybackslash}p{4.0cm}}
+\toprule
+size & discord & UC & ST \\
+\midrule
+1M   & 0.883 (1/9) FAIL / 0.838 (3/9) FAIL & 0.842 (1/9) FAIL / 0.698 (4/9) FAIL & \textbf{0.960 (0/9) WIN} / \textbf{0.911 (0/9) WIN} \\
+500K & 0.912 (1/9) FAIL / 0.738 (4/9) FAIL & 0.701 (2/9) FAIL / 0.791 (1/9) FAIL & 0.906 (1/9) V76 TIE / \textbf{0.932 (0/9) WIN} \\
+300K & 0.810 (1/9) FAIL / 0.840 (2/9) FAIL & 0.868 (1/9) FAIL / 0.633 (4/9) FAIL & \textbf{0.900 (0/9) WIN} / 0.775 (1/9) FAIL \\
+100K & 0.546 (9/9) FAIL / 0.582 (7/9) FAIL & 0.521 (3/9) FAIL / 0.751 (0/9) FAIL & 0.518 (6/9) FAIL / 0.673 (3/9) FAIL \\
+50K  & 0.667 (2/9) FAIL / 0.553 (5/9) FAIL & 0.428 (8/9) FAIL / 0.528 (7/9) FAIL & 0.480 (6/9) FAIL / 0.549 (6/9) FAIL \\
+10K  & 0.359 (7/9) FAIL / 0.463 (7/9) FAIL & 0.338 (9/9) FAIL / 0.331 (9/9) FAIL & 0.426 (4/9) FAIL / 0.447 (0/9) FAIL \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Reading.} Both architectures WIN on ST (3 of 4 cells at $\geq 500$K clear the bar; the V87-ST-300K 0.900 zero-cycle reading is the fourth ST WIN). Both architectures FAIL on UC, including at 1M where V87-UC reads 0.842, below V87-Discord-1M's 0.883 baseline. At 500K the transformer is \emph{ahead} of the mixer on ST (0.932 vs 0.906) while trailing badly on discord at 500K (0.738 vs the 0.912 mixer record; the registered discord-arm numbers pass through unchanged). V87-ST-1M 0.960 zero cycles is the new project-wide family record: the highest mean d2 ever measured on either architecture on any corpus. On discord specifically, no cell clears the WIN bar on either architecture (every discord cell at every size carries $\geq 1$ cycle, including V87-Discord-500K's 0.912 at 1/9), so the mixer's discord chatter advantage is relative --- higher d2 and fewer cycles than V88 --- not a WIN-bar-level moat.
+
+\subsection{Other Metrics (Per-Corpus)}
+
+\textbf{Table 4.4.} Question relevance (qrel) at 1M: echo / hijack / free (\%) per corpus per architecture. The registered bar: echo $\geq 50\%$ AND hijack $\leq 10\%$. All cells seed 42; the discord 3-seed extension is in Table 4.4a below.
+
+\textbf{Question relevance at 1M, echo/hijack/free (\%)} (the registered bar: echo $\geq 50\%$ AND hijack $\leq 10\%$):
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.4. Question relevance at 1M.}
+\begin{tabular}{lcc}
+\toprule
+corpus & V87 & V88 \\
+\midrule
+discord & 95.0 / 4.0 / n/a & 94.0 / 5.0 / n/a \\
+UC & 99 / 1 / 0 & 100 / 0 / 0 \\
+ST & 100 / 0 / 0 & 100 / 0 / 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All four UC/ST arms clear the bar at 1M. At 500K only the V88-ST arm clears the bar at 500K (echo 86 / hijack 7); the V88-UC arm fails the hijack constraint (echo 84 / hijack 14, where the bar requires hijack $\leq 10\%$). The mixer fails at 500K on both new corpora (echo 53 to 61, hijack 32 to 39). Echo never reaches 50\% below 500K for the mixer; the 300K transformer arms reach 55 to 62 while still failing the hijack bar.
+
+\textbf{Discord qrel is 3-seed (\S4.4.1).} The two discord cells above are the registered s42 readings (V87 95.0/4.0, V88 94.0/5.0). Across seeds 42/43/44 the ranges are: V87-1M echo 87--95 / hijack 4--9; V88-1M echo 90--94 / hijack 5--6; V87-500K echo 27--37 / hijack 48--53; V88-500K echo 73--84 / hijack 8--18. The bar conclusion is seed-stable with a 500K caveat: V88 clears the bar at 1M on every seed (hijack 5--6); at 500K V88 clears on its lower-hijack seeds but the upper end of its 8--18 hijack range violates the $\leq 10\%$ bar, so V88 does \emph{not} clear the bar at 500K on every seed (its 500K advantage is relative, not a clean pass); V87 does not clear the bar at 500K on any seed (its 1M cell clears on all three seeds but with a wider hijack ceiling, up to 9).
+
+\textbf{Unanswerable fabrication (per 18, casual OOD prompts).} All cells seed 42 (trends, not statistics; see \S3.7); the discord 3-seed ranges are documented in \S4.4.1.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.4b. Unanswerable fabrication (per 18).}
+\begin{tabular}{lccc}
+\toprule
+size & discord (V87 / V88) & UC (V87 / V88) & ST (V87 / V88) \\
+\midrule
+1M  & 18 / 15 & 16 / 15 & 15 / 12 \\
+500K & 17 / 16 & 15 / 14 & 17 / 13 \\
+300K & 15 / 15 & 16 / 16 & 17 / 16 \\
+100K & 12 / 12 & 16 / 18 & 17 / 16 \\
+50K  & 12 / 5  & 14 / 3 (evasive) & 16 / 14 \\
+10K  & 0 / 0   & 0 / 0 (degener.) & 0 / 0 (degener.) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Registered no-abstention baseline:} discord = 16.7 / 18.
+
+FMSP without abstention training fabricates answers to unanswerable probes in roughly the same range (12 to 18 of 18) regardless of corpus. The single-corpus exception is the V88-UC-50K cell, which collapses into evasive templates (3 fabrications + 12 evasive + 3 degenerate), a quality failure, not a fabrication improvement.
+
+\textbf{Discord fabrication is 3-seed (\S4.4.1).} The discord columns above are the registered s42 values (V87 18/17/15/12/12/0, V88 15/16/15/12/5/0). Across seeds 42/43/44 the 3-seed ranges are seed-stable: V87 16--18 / 15--17 / 15--16 / 7--12 / 11--14 / 0--1 and V88 13--18 / 13--16 / 15--16 / 12--14 / 5--7 / 0 (sizes 1M down to 10K). The corpus-invariance reading (12 to 18 of 18 at $\geq 300$K on both architectures) and the V88-50K evasive-template low (5--7) both hold under 3 seeds.
+
+\textbf{FMSP end-of-epoch cross-entropy} (cross-entropy on the FMSP answer-only region, lower is better). All cells seed 42 (trends, not statistics; see \S3.7).
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.4c. FMSP end-of-epoch cross-entropy (answer-only region).}
+\begin{tabular}{lcc}
+\toprule
+size & UC (V87 / V88) & ST (V87 / V88) \\
+\midrule
+1M  & 0.005 / 0.005 & 0.004 / 0.005 \\
+500K & 0.026 / 0.021 & 0.024 / 0.020 \\
+300K & 0.077 / 0.085 & 0.082 / 0.113 \\
+100K & 0.771 / 0.802 & 0.780 / 0.862 \\
+50K  & 1.118 / 1.127 & 1.138 / 1.156 \\
+10K  & 1.721 / 1.741 & 1.754 / 1.754 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 0.77 train-CE floor at $\leq 100$K (and EM = 0) is the same on every corpus. The 300K inversion (V87 below V88, partial recovery on UC, gone on ST) is reported in Section 4.11.
+
+\subsubsection{Discord 3-seed baseline (non-EM metrics)}
+
+\textbf{Tables 4.4a (V87) and 4.4b (V88).} Discord 3-seed (seeds 42/43/44) qrel, casual-OOD hijack, fabrication, and Discord PPL on the registered discord arms. OOD hijack column reports the 3-seed mean with the s42 value in parentheses.
+
+The tables above report the registered s42 discord columns. We re-ran the discord qrel, casual-OOD, unanswerable, and langpreserve evals on the registered discord FMSP arms at seeds 43 and 44 (sources \texttt{logs/discord3seed/}), so discord qrel / OOD hijack / fabrication / Discord PPL are now all 3-seed (42/43/44). Chatter stays s42 everywhere (it is a discord-register battery and is not re-run here). Every entry below is transcribed from a log; nothing is estimated. qrel and fabrication columns are 3-seed ranges; the OOD column is the 3-seed mean with the registered s42 value in parentheses; Discord PPL is s42 / s43 / s44.
+
+\textbf{V87 (CCD-Mixer), discord:}
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4.4a. V87 discord 3-seed.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.4cm}>{\centering\arraybackslash}p{2.6cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{3.0cm}}
+\toprule
+size & qrel echo / hijack (3-seed range, \%) & OOD hijack mean (s42) & fabrication range (/18) & Discord PPL (s42/s43/s44) \\
+\midrule
+1M   & echo 87--95 / hijack 4--9   & 18.1\% (6.8)   & 16--18 & 3.66 / 3.66 / 3.66 \\
+500K & echo 27--37 / hijack 48--53 & 35.0\% (35.6)  & 15--17 & 4.00 / 3.99 / 4.00 \\
+300K & echo 4--11 / hijack 60--70  & 24.8\% (25.4)  & 15--16 & 4.47 / 4.47 / 4.46 \\
+100K & echo 4--8 / hijack 34--59   & 23.1\% (27.1)  & 7--12  & 4.98 / 5.00 / 5.00 \\
+50K  & echo 2--4 / hijack 31--64   & 52.0\% (6.8)   & 11--14 & 5.19 / 5.22 / 5.20 \\
+10K  & echo 0 / hijack 0--5        & 0.0\% (0.0)    & 0--1   & 6.70 / 6.77 / 6.75 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{V88 (transformer), discord:}
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 4.4b. V88 discord 3-seed.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.4cm}>{\centering\arraybackslash}p{2.6cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{3.0cm}}
+\toprule
+size & qrel echo / hijack (3-seed range, \%) & OOD hijack mean (s42) & fabrication range (/18) & Discord PPL (s42/s43/s44) \\
+\midrule
+1M   & echo 90--94 / hijack 5--6   & 8.5\% (8.5)    & 13--18 & 3.52 / 3.52 / 3.51 \\
+500K & echo 73--84 / hijack 8--18  & 16.9\% (11.9)  & 13--16 & 3.98 / 3.97 / 3.96 \\
+300K & echo 24--33 / hijack 44--54 & 16.4\% (18.6)  & 15--16 & 4.47 / 4.47 / 4.46 \\
+100K & echo 4--8 / hijack 72--74   & 62.2\% (67.8)  & 12--14 & 4.92 / 4.91 / 4.92 \\
+50K  & echo 3--4 / hijack 29--38   & 26.5\% (23.7)  & 5--7   & 5.28 / 5.28 / 5.28 \\
+10K  & echo 0 / hijack 0           & 16.9\% (0.0)   & 0      & 6.79 / 6.82 / 6.79 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Reading.} Three conclusions are seed-stable, one is not. (1) The qrel bar ordering is seed-stable with a 500K caveat: V88 clears the echo $\geq 50\%$ / hijack $\leq 10\%$ bar at 1M on every seed (hijack 5--6) and clears at 500K on its lower-hijack seeds, but the upper end of its 500K hijack range (8--18 with echo 73--84) violates the $\leq 10\%$ bar, so V88's 500K pass is partial, not seed-uniform; V87 does not clear the bar at 500K on any seed (1M hijack 4--9 passes narrowly but 500K hijack 48--53 fails on every seed) --- the \S4.4 bar conclusions hold under 3 seeds with the 500K upper-end caveat noted. (2) Fabrication ranges are seed-stable: both architectures fabricate 12--18 / 18 at $\geq 300$K with the same corpus-invariance reported in \S4.9, and V88-50K stays low (5--7) for the same evasive-template reason. (3) Discord PPL is seed-stable at s42/s43/s44 (V87 1M 3.66/3.66/3.66, V88 1M 3.52/3.52/3.51; every size within 0.07 PPL across seeds). The non-stable axis is OOD hijack: the registered s42 1M near-parity (V87 6.8\% vs V88 8.5\%) is a partly lucky draw. V87-1M's casual hijack reads 6.8 / 22.0 / 25.4 across seeds (mean 18.1\%) while V88-1M reads 8.5 / 3.4 / 13.6 (mean 8.5\%); on the legacy collapse-blind metric, the transformer is ahead at 1M once seed noise is admitted (18.1 vs 8.5). The same shift is larger at 50K (V87 s42 6.8 $\to$ mean 52.0, s43/s44 66.1 / 83.1; see Appendix B.1 for the chance-match caveat). This is plain seed noise on the legacy metric, before any collapse rescoring; it confirms with independent seeds what \S5 argues from the collapse-rescore, namely that the s42 discord OOD corner was favourable to V87. The \S5 collapse-rescore (1M rescored V87 39.0\% vs V88 57.6\%) is a different, collapse-inclusive measurement on the same battery and stands as-is; the legacy 3-seed mean and the collapse-rescore agree on direction (V87's s42 OOD edge was overstated) for different reasons (seed noise vs collapse-inclusive detection).
+
+\subsection{Capability Lift from Corpus Change}
+
+At fixed architecture, recipe, and parameter budget, lifting the pretraining corpus from Discord-Dialogues to UltraChat or SmolTalk2 produces:
+
+\begin{itemize}
+  \item \textbf{Full-988 EM at 1M.} Headline lifts use the pure 3-seed/3-seed basis (3-seed UC/ST numerators over 3-seed discord denominators, seeds 42/43/44, \S4.2.1): V87-UC 695.3 ($+131.6$ over V87-Discord-1M's 563.7, $+23\%$); V88-UC 741.3 ($+88.0$ over V88-Discord-1M's 653.3, $+13\%$); V87-ST 729.0 ($+165.3$, $+29\%$); V88-ST 741.3 ($+88.0$, $+13\%$). Single-seed (s42) point values remain visible in the \S4.2 table as the registered measurements (V87-UC 694, V88-UC 749, V87-ST 739, V88-ST 744). Net: a $+13\%$ to $+29\%$ capability lift from changing the pretraining corpus (and, necessarily, its corpus-linked FMSP probe anchors; \S3.4) on the 3-seed/3-seed basis (the lower bound $+13\%$ comes from V88's 3-seed ST lift and the upper $+29\%$ from V87's 3-seed ST lift). The mixed basis (s42 numerators over the 3-seed discord means) gives $+14\%$ to $+31\%$.
+  \item \textbf{Full-988 EM at 300K.} The relative lift is $2.4\times$ to $5.0\times$: V87-Discord-300K 56.3 becomes V87-UC 134 and V87-ST 133; V88-Discord-300K 42.0 becomes V88-UC 211 and V88-ST 137. The mixer sees $\sim$$2.4\times$ more memorization at identical budget, the transformer $3.3\times$ to $5.0\times$ ($2.4\times$ to $5.0\times$ overall).
+  \item \textbf{Internal-200 EM.} The held-out-but-overlapping subset mirrors the same lift: V87-UC-1M 102 vs V87-Discord-1M 62 ($1.6\times$); V88-UC-1M 126 vs V88-Discord-1M 76 ($1.7\times$); V87-ST-1M 117 vs 62 ($1.9\times$); V88-ST-1M 118 vs 76 ($1.6\times$). At 500K: V88-UC 66 vs V88-Discord 28 ($2.4\times$); V87-ST 46 vs V87-Discord 12 ($3.8\times$).
+\end{itemize}
+
+This is the central capability finding. On every metric where the corpus matters, data quality is the first-order variable for capability at identical budget (with the architecture-level exceptions noted below and in \S4.11). The architecture gap on memorization, V88 minus V87, shrinks from 89.6 EM (13.7\% of V88) on discord, to the largest point gap ($+46.0$ EM, $t=7.75$, $p=0.012$; not significant after the Bonferroni correction we cite ($\alpha=0.0083$); directionally consistent with the mid-budget UC pattern) over 3 seeds at UC-1M, to $+12.3$ over 3 seeds at ST-1M ($t = 2.27$, $df = 2.47$, $p = 0.13$; permutation $p = 0.20$ --- not significant; the 95\% CI on the ST-1M gap is [$-7$, $+32$] EM, so gaps up to $\sim$30 EM in either direction remain compatible with the data; a TOST equivalence test at $n=3$ would require a margin $\geq 26$ EM (90\% CI) to declare equivalence --- too large to be meaningful; the ST-1M result is unresolved, not equivalent; \S4.6). At $n=3$ the permutation test cannot confirm the UC-1M result either (floor $p\geq 0.10$), so UC-1M significance rests on the parametric Welch test alone. At the top budget on the most heavily curated corpus, two structurally different backbones are statistically unresolved on full memorization at three seeds. The architecture term is \emph{not} globally second-order, however: at $\leq 500$K budgets the transformer advantage on UC/ST is large and robust (UC-500K $+142.7$, $t = 17.3$, $p = 0.002$; ST-500K $+96.7$, $t = 25.4$, $p < 0.001$; UC-300K $+87.0$, $t = 21.2$, $p < 0.001$; only ST-300K is not significant, $-8.7$, $t = -1.6$, $p = 0.23$, mixer ahead; \S4.11), so the ``first-order data, second-order architecture'' reading holds at 1M on the friendliest corpus and does not extend to the mid-budget capability gap.
+
+\subsection{The Architecture Gap Closes with Corpus Quality}
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.6. Architecture gap on memorization at 1M (s42).}
+\begin{tabular}{p{3.0cm}>{\centering\arraybackslash}p{3.2cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{2.2cm}>{\centering\arraybackslash}p{2.8cm}}
+\toprule
+corpus & V87 1M & V88 1M & V88 minus V87 & gap as \% of V88 \\
+\midrule
+discord (Part-1 3-seed mean) & 563.7 & 653.3 & 89.6 & 13.7\% \\
+UC (s42) & 694 & 749 & 55 & 7.3\% \\
+ST (s42) & 739 & 744 & 5 & 0.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 89.6-point gap on discord shrinks by 94\% on ST at seed 42. The lift in the mixer's EM exceeds the lift in the transformer's EM by enough to nearly erase the architectural advantage at the single-seed reading.
+
+\textbf{Three-seed picture (seeds 42/43/44, \S4.2.1).} The architecture gap at 1M, with error bars on both arms:
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.6a. Architecture gap at 1M (3-seed). \textdagger-marked gaps are statistically unresolved at $n = 3$: UC-1M fails the Bonferroni correction we cite ($\alpha = 0.0083$) and its permutation floor is $p \geq 0.10$; ST-1M is $p = 0.13$ (permutation $p = 0.20$). Unresolved is not zero (\S4.6).}
+\begin{tabular}{p{4.6cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{2.4cm}ccc}
+\toprule
+corpus & V87 mean (sample sd) & V88 mean (sample sd) & V88 - V87 & Welch t (df) & p \\
+\midrule
+discord (ref, Part-1 3-seed mean; not re-run in \S4.2.1) & 563.7 & 653.3 & $+89.6$ & (inherited) & --- \\
+UC-1M  & 695.3 (2.31) & 741.3 (10.02) & $+46.0$\textdagger & 7.75 (df 2.21) & 0.012 \\
+ST-1M  & 729.0 (8.89) & 741.3 (3.06)  & $+12.3$\textdagger & 2.27 (df 2.47) & 0.13 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $n = 3$ the Welch--Satterthwaite df is $\approx$ 2.2--2.5, for which the two-sided 95\% critical value is $t \approx$ 3.6 to 3.9 across df 2.2--2.5 (3.93 at df 2.21, 3.61 at df 2.47). The discord gap of 89.6 EM collapses to a \textbf{statistically undetectable gap} on SmolTalk2 ($+12.3$ EM, $t = 2.27$, $df = 2.47$, $p = 0.13$; permutation $p = 0.20$ --- below the 95\% critical value) and to the \textbf{largest point gap} on UltraChat ($+46.0$ EM, $t = 7.75$, $df = 2.21$, $p = 0.012$; not significant after the Bonferroni correction we cite ($\alpha=0.0083$); directionally consistent with the mid-budget UC pattern). At $n=3$ the permutation test cannot confirm the UC-1M result (floor $p\geq 0.10$), so UC-1M significance rests on the parametric Welch test alone. The dominant term in the discord $\to$ ST capability lift remains the corpus, and the s42 reading that displayed an ST-1M ``tie'' (739 vs 744, a 5-question gap) is \textbf{confirmed rather than overturned} by the 3-seed picture: the test is underpowered at $n = 3$, and a $\sim$12-EM gap cannot be resolved either way. V87's seed variance at ST-1M (sample sd 8.9) is larger than V88's (sample sd 3.1), and on the two new seeds V87 drifts \emph{downward} (739 $\to$ 722/726), so seed 42 was V87's favourable draw at ST-1M; that drift widens the mean gap from the s42 +5 to +12.3 but does not carry it to significance at $n = 3$.
+
+\textbf{Bootstrap CI (secondary, s42 window-level binomial).} A window-level binomial bootstrap on the s42 cumulative-EM bins (10 windows of 100/88 questions; 10,000 replicates; the eval logs do not dump per-question pass/fail, so this is necessarily a stratified-window resample, conservative-wide on the diff) gives, for the paired V88 - V87 difference on the same 988 questions: discord-1M $+99$ EM, 95\% CI [$+63$, $+136$] (excludes 0, robust); UC-1M $+55$, CI [$+20$, $+90$] (excludes 0, robust); ST-1M $+5$, CI [$-30$, $+40$] (includes 0, consistent with noise at s42 alone).\footnote{The discord-1M bootstrap centre ($+99$) differs from the 3-seed-mean table gap (89.6) because the bootstrap operates on the \textbf{s42} per-question bins (V87 s42 EM = 564 per Part 1), which are not the same inputs as the registered Part-1 3-seed mean (563.7 = mean of 564/559/568); the 9.4 EM discrepancy is the difference between the s42-bin bootstrap centre and the 3-seed-mean table gap, not an error.} The s42 bootstrap cannot resolve the ST-1M tie; the 3-seed paired comparison is the stronger test, and it does not reject equality ($t = 2.27$, $df = 2.47$, $p = 0.13$; permutation $p = 0.20$), consistent with the s42 bootstrap CI [$-30$, $+40$]. Method and caveat in the bootstrap CI note.
+
+The honest framing of the architecture-gap-closure claim is therefore: data quality is the first-order variable for capability at 1M on every corpus (3-seed/3-seed range $+13\%$ to $+29\%$; the mixed basis, s42 numerators over 3-seed discord means, gives $+14\%$ to $+31\%$), and the residual architecture term at the top budget collapses from a robust $+89.6$ on discord to the largest point gap $+46.0$ on UC (not significant after the Bonferroni correction we cite ($\alpha=0.0083$)) and a statistically undetectable $+12.3$ on ST ($p = 0.13$; permutation $p = 0.20$). The dominance claim is scoped to capability/memorization at the 1M budget: at $\leq 500$K budgets the architecture term is robust and large on UC/ST (\S4.11), and the collapse-propensity gap (\S5) is an architecture effect independent of capability. Two interpretations of the ST-1M residual are consistent with these numbers. Either SmolTalk2 is a friendlier distribution for the mixer's non-LTI token-mix, or the headroom on memorization from 563.7 to $\sim$729 (3-seed) is genuinely easier to clear than the headroom from 653.3 to $\sim$741 (the latter being $\sim$88 points from a higher base). The two interpretations imply different priors on what is reusable in the mixer's content-gate; the data cannot decide between them at this scale (and at $n = 3$ cannot even confirm the gap is non-zero). Both interpretations, and the headline thesis, are conditional on the scope caveats in \S7.
+
+\subsection{Chatter Moat Is Register-Dependent}
+
+The V87 anti-collapse chatter moat on Discord-Dialogues is real and strong at 500K to 1M (0.912, 0.883) and absent on UltraChat (0.842 at 1M, below the 0.883 discord baseline). The same architecture on a different pretraining corpus loses its anti-collapse property. The moat does not generalize across registers.
+
+The transformer, meanwhile, sets its own anti-collapse record on SmolTalk2: 0.911 zero cycles at 1M and 0.932 zero cycles at 500K, both WINs. At 500K specifically, the transformer is \emph{ahead of the mixer} on ST (0.932 vs 0.906), the same architecture that never exceeded 0.838 to 0.840 on discord. The mixer's WIN on ST is the family record (0.960 zero cycles at 1M, also 0 cycles), but the moat is a register $\times$ dataset interaction, not an architecture property.
+
+The pragmatic reading: any small-LM paper that reports an ``anti-collapse win'' on a chat-format corpus must report the corpus distribution of the prompts alongside the corpus distribution of the training data. Within-corpus comparisons are honest. Across-corpus comparisons carry the register confound documented in Section 7.
+
+\subsection{The $4\times$ to $10\times$ OOD-Hijack Explosion}
+
+CASUAL-battery OOD hijack percentages at 1M:
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.8. CASUAL OOD hijack at 1M.}
+\begin{tabular}{lcc}
+\toprule
+corpus & V87 & V88 \\
+\midrule
+discord & 6.8\% (4/59) & 8.5\% (5/59) \\
+UC & 64.4\% (38/59) & 39.0\% (23/59) \\
+ST & 47.5\% (28/59) & 37.3\% (22/59) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+That is a $7.0\times$ to $9.5\times$ OOD-hijack explosion for the mixer and $4.4\times$ to $4.6\times$ for the transformer, on both new corpora. Section 5 shows that this surface reading is roughly M1 $\times$ M2 with a small M3 residual: approximately $2\times$ to $3\times$ of probe-register mismatch, approximately $2\times$ to $3\times$ of evaluation-register mismatch, and a small backbone term. Almost all of the explosion is not about the model.
+
+\textbf{The discord baseline column is now 3-seed (\S4.4.1).} The registered s42 discord cells (V87 6.8\%, V88 8.5\%) are the s42 corner of a noisy legacy measurement: across seeds the s42 1M near-parity (6.8 vs 8.5) does not survive --- at the 3-seed mean the transformer is ahead (full data in \S4.4.1) --- and the UC/ST ``explosion'' multiples computed off the s42 6.8\% baseline overstate V87's OOD discipline rather than understate it. This is plain seed noise, before any collapse rescoring; the \S5 collapse-rescore (1M rescored V87 39.0\% vs V88 57.6\%) is a separate, collapse-inclusive measurement that reaches the same direction (the s42 corner flattered V87) for a different reason.
+
+\subsection{Fabrication Is Corpus-Invariant}
+
+FMSP without the abstention self-distillation data (V79) fabricates answers to unanswerable probes at a near-constant rate across corpora: the cross-corpus range on every new arm at every size where the model is engaged is 12 to 18 per 18, comparable to the registered discord no-abstention baseline of 16.7 per 18. The corpus does not teach abstention. Only the abstention-data mixture does. Pretraining on a cleaner chat corpus does not help.
+
+\subsection{Perplexity Within-Dataset}
+
+The transformer wins nearly every within-dataset cell (Section 4.1). Mixer edges are concentrated at 10K (UC $+0.15$, ST $+0.04$, TS $+0.25$) and 50K ST ($+0.02$). Within-dataset margins are 0.02 to 0.25 nats. The largest 1M margins are UC 0.15 and ST 0.11. Cross-dataset PPL is not directly comparable (different val distributions), so within-dataset ranking is the only honest cross-architecture PPL claim.
+
+\subsection{The 300K Inversion and its Corpus-Dependence}
+
+The \textbf{300K inversion} is the discord result in which the mixer beats the transformer at 300K memorization: end-of-epoch CE 0.104 vs 0.183 and EM 60 vs 40. The CE advantage is approximately 44\%. On UC the inversion partially recovers (V87 0.077 vs V88 0.085, EM 134 vs 211, but the EM is still V88 ahead). On ST the inversion disappears entirely on the metric side (V87 0.082 vs V88 0.113, EM 133 vs 137, transformer edges by 4 EM, well inside noise).
+
+\textbf{Three-seed picture at 300K (seeds 42/43/44, \S4.2.1).} With error bars, the 300K architecture ordering is \textbf{corpus-dependent}, and cleanly so:
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.11. Architecture ordering at 300K (3-seed).}
+\begin{tabular}{p{3.4cm}>{\centering\arraybackslash}p{3.0cm}>{\centering\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{4.4cm}}
+\toprule
+corpus & V87 mean (sample sd) & V88 mean (sample sd) & V88 - V87 \\
+\midrule
+discord (ref, s42; not re-run in \S4.2.1) & 60 & 40 & $-20$ (s42) \\
+UC-300K  & 126.3 (6.81) & 213.3 (2.08) & $+87.0$ (transformer ahead, robust) \\
+ST-300K  & 135.3 (2.08) & 126.7 (8.96) & $-8.7$ (mixer edges ahead, but ranges overlap) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The UC-300K transformer advantage is \textbf{robust} (V88 mean 213.3 with the tightest sd in the whole table, 2.08, vs V87 mean 126.3 with sd 6.81; the ranges do not overlap). The ST-300K side is \textbf{noise}: V87's mean edges ahead by 8.7 EM (computed on unrounded means, 135.33 $-$ 126.67 = 8.67 $\approx$ $-8.7$) but V88's sd is 8.96 (V88's two new seeds drop from 137 to 122/121), so the 3-seed ranges overlap and the s42 reading (V88 ahead by 4) flips sign without leaving the noise envelope. On discord the s42 inversion (V87 ahead by 20) is \textbf{bootstrap-supported}: a window-level binomial bootstrap on the s42 bins gives V88 - V87 = $-20$ EM at discord-300K with 95\% CI [$-38$, $-2$] (the upper bound ($-2$) sits just below zero, so the CI excludes 0), so V87 ahead on discord-300K is robust at s42 alone. (The discord 3-seed EM here is the \textbf{registered Part-1 measurement}: 563.7 at 1M = mean of 564/559/568 and the per-seed 300K values 60/60/49 are inherited from Part 1; this paper's \S4.2.1 extension re-runs only the UC/ST arms, so a fresh discord 3-seed EM re-run is not part of this paper's new measurements. The bootstrap on the s42 bins is the available test within this paper. Sd values here are sample sd, N$-1$, computed from the per-seed values.)
+
+\textbf{Summary.} The 300K architecture ordering is corpus-dependent - robust transformer advantage on UC, noise on ST, mixer advantage on discord (bootstrap-supported). The mechanism is plausibly that the mixer's non-LTI token-mix holds its distribution together under the noisier discord data at 300K, but the cleaner chat corpora (UC especially) compound reliably enough per-byte to hand the transformer a robust mid-budget memorization edge. The data asymmetry between discord and UC is enough to swamp the asymmetry between the architectures at this budget; ST sits in between and is not resolvable at 3 seeds.
+
+\subsection{External Anchor: Official TinyStories Validation Perplexity (4.12)}
+
+Every perplexity number in Table 4.1 is measured on an internal 10\% holdout of the training stream (\S3.3), and every capability number in \S4.2 derives from the project-internal held-out QA set --- no measurement so far is aligned with anything outside the project. The TS arm admits the standard external anchor for this corpus: the \emph{official} \texttt{roneneldan/TinyStories} validation split [Eldan and Li, 2023] (21,990 non-empty stories), which no TS arm saw in training (the loader streams split \texttt{train} only, capped at 200K rows; \S3.2). We score all twelve TS pretrain checkpoints on it with the identical byte-flattening pipeline used in pretraining (\S3.3): one sequence per story, ctx 1024, \texttt{[BOS]} + first 1,023 UTF-8 bytes, mean CE over non-pad positions; byte-PPL $=\exp(\mathrm{CE})$ and bits-per-byte $\mathrm{BPB}=\mathrm{CE}/\ln 2$ over the 17.37M scored bytes. As an external reference point we also score GPT-2-small (124.4M parameters [Radford et al., 2019]) on the identical byte prefixes: BPB is tokenizer-independent, so GPT-2's BPE-grid perplexity is not comparable to byte-PPL and is not reported, but its BPB is. (Eval script \texttt{eval\_tinystories\_official\_val.py}; results JSON \texttt{logs/v87/tinystories\_official\_val.json}; the official split is disjoint from the train stream by construction [Eldan and Li, 2023], so this measurement is contamination-free.)
+
+\textbf{Table 4.12.} Official TinyStories validation-split byte-PPL and BPB (V87 / V88, lower is better), with GPT-2-small as the external BPB reference. All twelve cells seed 42 (PPL on a fixed split has no seed dependence beyond the s42 checkpoint itself; see \S3.7).
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 4.12. External anchor: official TinyStories validation-split results.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.6cm}>{\centering\arraybackslash}p{3.2cm}}
+\toprule
+size & byte-PPL (V87 / V88) & BPB (V87 / V88) \\
+\midrule
+1M   & 1.79 / 1.70 & 0.843 / 0.767 \\
+500K & 1.91 / 1.80 & 0.937 / 0.850 \\
+300K & 2.02 / 1.91 & 1.012 / 0.933 \\
+100K & 2.32 / 2.29 & 1.215 / 1.198 \\
+50K  & 2.61 / 2.62 & 1.386 / 1.388 \\
+10K  & 4.08 / 4.34 & 2.030 / 2.117 \\
+\midrule
+GPT-2-small (124.4M, BPE) & -- (tokenizer grid differs) & 0.849 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Reading.} Three checks fall out of the anchor. (a) \emph{The internal holdout was honest}: every official-split cell agrees with the internal TS column of Table 4.1 to within 0.02 PPL, and the architecture ordering is identical (V88 ahead at $\geq$100K, V87 ahead at 10K, 50K a hair-thin V87 edge replacing the internal exact tie), so the within-corpus PPL claims of \S4.11 are not an artifact of the holdout choice. (b) \emph{The absolute scale is now locatable on a standard axis}: the full 10K$\to$1M ladder (BPB 2.117$\to$0.767) is measured on a public split that any external reader can re-score, giving the project its first cross-study-comparable numbers. (c) \emph{The GPT-2 reference calibrates what in-domain pretraining buys}: GPT-2-small --- $125\times$ larger than the 1M arms and never trained on TinyStories (WebText predates the corpus) --- reads BPB 0.849 zero-shot, between the V87-1M (0.843) and V87-500K (0.937) cells, and the in-domain V88-1M (0.767) surpasses it. This is an in-domain vs zero-shot contrast, not a capability claim over GPT-2: its content is that on this corpus, 200K-row in-domain pretraining at 1M parameters buys what a $125\times$ larger general-corpus model carries in prior.
+
+\section{The OOD Boundary Audit}
+
+\textbf{Table 5.1: the three axes of the OOD evaluation framework.} (register = training-distribution style.)
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 5.1. The three axes of the OOD evaluation framework.}
+\begin{tabular}{p{3.5cm}p{7cm}l}
+\toprule
+axis & levels (this paper) & section(s) \\
+\midrule
+Axis 1: Probe Register & Own = in-distribution anchors (same corpus as pretrain) ; Dprobe = discord-register anchors forced at the FMSP probe step only & \S5.1, \S5.2 \\
+Axis 2: Eval Register & Casual = \texttt{ood\_eval\_v77.txt}, 59 prompts (CASUAL/\allowbreak ABSURD/\allowbreak NONENGLISH/\allowbreak CODE/\allowbreak FRAGMENT/\allowbreak STATEMENT) ; Formal = \texttt{ood\_eval\_regmatch.txt}, 60 prompts (FORMAL-QA/\allowbreak INSTRUCT-TASK/\allowbreak MULTITURN-CHAT/\allowbreak FORMAL-STATEMENT/\allowbreak FORMAL-FRAGMENT/\allowbreak TECHNICAL) & \S5.1, \S5.3 \\
+Axis 3: Collapse Detection & Legacy = memorization-matching detector (collapse-blind) ; Rescored = word-3-gram >=5x rule reclassifies loops as hijack & \S5.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 2x2 design of \S5.1-\S5.5 varies axes 1 and 2; \S5.6 varies axis 3; M1/M2/M3 map to (axis 1) / (axis 2) / (residual backbone term).
+
+This section audits the $4\times$ to $10\times$ OOD explosion and the 500K V88 OOD ``win'' reported in Section 4.8. Both surface readings are partly or largely artifacts of measurement, not of model properties. The M1 $\times$ M2 framing below is a rough decomposition, not a validated model: the M1$\times$M2 marginal effects are not independent, and for V87-UC-1M the multiplicative prediction (38 $\times$ 15/38 $\times$ 28/38 $\approx$ 11) underpredicts the observed Dprobe-formal cell (23) by $\sim$$2\times$, so the two controls partially substitute rather than multiply; the ``M1 $\times$ M2'' decomposition should therefore be read as a way to label the two axis-swings, not as an additive/multiplicative model with independent terms.
+
+\subsection{The $2\times 2$ Design}
+
+The $2\times 2$ design varies two factors:
+
+\begin{itemize}
+  \item \textbf{Factor 1: Probe anchors.} ``Own'' in-distribution probe-KL anchors (Fisher profiling stays in-distribution; the 1200 anchors come from the model's pretraining corpus, own sliding window \texttt{[2000:3200]}, seed-42 shuffle). ``Dprobe'' equals the discord probe anchors, substituted only at the FMSP-probe step, with all else unchanged.
+  \item \textbf{Factor 2: Evaluation register.} ``Casual'' battery (\texttt{ood\_eval\_v77.txt}, 59 prompts, categories CASUAL/ABSURD/NONENGLISH/CODE/FRAGMENT/STATEMENT). ``Formal'' battery (\texttt{ood\_eval\_regmatch.txt}, 60 prompts, FORMAL-QA, INSTRUCT-TASK, MULTITURN-CHAT, FORMAL-STATEMENT, FORMAL-FRAGMENT, TECHNICAL).
+\end{itemize}
+
+The full $2\times 2$ produces four cells per arm: (own, casual), (Dprobe, casual), (own, formal), (Dprobe, formal). Eight new FMSP runs are required: V87/V88 $\times$ UC/ST $\times$ \{1M, 500K\} $\times$ Dprobe.
+
+\subsection{M1: Probe-Anchor Switch (approximately $2\times$ to $3\times$)}
+
+Holding the evaluation register fixed and swapping only the probe anchors (own $\to$ Dprobe), the casual-register hijack count drops:
+
+\textbf{Table 5.2.} Casual-register hijack counts (/59), own-probe vs Dprobe (V87 / V88), seed 42.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 5.2. Casual-register hijack counts (/59), own-probe vs Dprobe.}
+\begin{tabular}{p{2.0cm}>{\centering\arraybackslash}p{3.0cm}>{\centering\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{5.0cm}}
+\toprule
+arm & own (casual, s42) & Dprobe (casual, s42) & reduction \\
+\midrule
+V87-UC-1M & 38 & 15 & minus 23 \\
+V87-ST-1M & 28 & $\sim$20 (3-seed mean 20.0; s42 21) & minus $\sim$8 (smallest reduction; conserved-total exception, \S5.4(ii)) \\
+V88-UC-1M & 23 & 12 & minus 11 \\
+V88-ST-1M & 22 & 12 & minus 10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For both transformer arms, the Dprobe \textbf{total} (casual + formal) hijack counts land within 3 to 4 counts of the discord reference total (Dprobe V88-UC \textbf{19 (total)} vs discord V88 reference \textbf{16 (total, s42 = 5 casual + 11 formal per \S5.3)}; Dprobe V88-ST \textbf{20 (total)} vs \textbf{16 (total)}). Note the scope difference: the table above is \textbf{casual-only} counts (/59), whereas the discord-reference comparison in this paragraph is on \textbf{total} counts (casual /59 + formal /60) --- the two scopes are individually correct but not directly subtractable. For the transformer, the probe-anchor switch alone explains essentially the entire residual that M2 does not. The mixer's V87-UC-1M-CASUAL-Dprobe cell goes from 7 own to 0 of 10 hijacks in CASUAL itself, the cleanest single-category cell in the dataset.
+
+\textbf{Memorization shows no statistically detectable cost from the probe-anchor switch at $n=3$ (EM within 3.7 sample sd of the own-probe s42 baseline at every arm; a mean cost of $-2$ to $-20$ EM cannot be excluded).} The hijack drops above carry no \emph{statistically detectable} memorization cost: full-988 EM on the four 1M Dprobe arms across seeds 42/43/44 stays within 3.7 sample sd of the own-probe s42 baseline (data from \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DPROBE_MULTISEED_ANALYSIS.md}{[DPROBE\_MULTISEED\_ANALYSIS.md]} \S3, lines 127-132; zero new experiments here):
+
+\textbf{Table 5.3.} Full-988 EM on the four 1M Dprobe arms across seeds 42/43/44 vs the own-probe s42 baseline. Dprobe 3-seed mean $\pm$ sd. The 3 seeds are FMSP seeds 42/43/44 on a single s42-pretrained backbone (pretraining seed held at 42; \S3.7).
+
+\begin{table}[!t]
+\centering
+\footnotesize
+\caption*{Table 5.3. Dprobe EM across seeds 42/43/44 vs own-probe s42.}
+\begin{tabular}{lccc}
+\toprule
+arm & own-probe EM (s42) & Dprobe EM s42 / s43 / s44 & Dprobe 3-seed mean $\pm$ sd \\
+\midrule
+V87-UC-1M & 694 & 692 / 677 / 684 & 684.3 $\pm$ 7.6 \\
+V87-ST-1M & 739 & 715 / 721 / 725 & 720.3 $\pm$ 5.0 \\
+V88-UC-1M & 749 & 721 / 728 / 738 & 729.0 $\pm$ 8.5 \\
+V88-ST-1M & 744 & 752 / 745 / 741 & 746.0 $\pm$ 5.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+No arm's own-probe s42 EM differs from the Dprobe 3-seed mean by more than 3.7 sample sd: V87-ST is $+18.7$ EM (3.7 sd), V88-UC is $+20.0$ EM (2.4 sd), V87-UC is $+9.7$ EM (1.3 sd), and V88-ST is $-2.0$ EM (0.4 sd, the only arm inside $\pm 1$ sd). Three of the four arms therefore sit outside the $\pm 1$ sd envelope. The largest sd-normalized deviation is V87-ST-1M, whose own-probe s42 (739) is $+18.7$ above the Dprobe 3-seed mean (720.3) --- a seed-42 corner effect visible in the Dprobe s42 cell itself (715), not an anchor effect. The honest reading is \textbf{no statistically detectable memorization cost at $n=3$} (a mean cost of $-2$ to $-20$ EM cannot be excluded at three seeds). Table 5.3 and Table 4.2a both report sample sd (N$-1$), matching \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DPROBE_MULTISEED_ANALYSIS.md}{[DPROBE\_MULTISEED\_ANALYSIS.md]} \S3 and the standard statistical convention.
+
+\subsection{M2: Eval-Register Asymmetry (approximately $2\times$ to $3\times$)}
+
+Holding the probe anchors fixed and switching only the evaluation register:
+
+\textbf{Table 5.4.} Casual vs formal hijack counts and percentages across arms (own-probe except where noted). All cells seed 42 (the 3-seed extension on the discord casual column is in \S4.4.1) --- see \S3.7 for the full seed policy.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 5.4. Casual vs formal hijack counts and percentages.}
+\begin{tabular}{lccc}
+\toprule
+arm & casual hijack /59 & formal hijack /60 & delta \\
+\midrule
+V87-Discord-1M & 4 (6.8\%) & 25 (41.7\%) & $+21$ \\
+V88-Discord-1M & 5 (8.5\%) & 11 (18.3\%) & $+6$ \\
+V87-UC-1M & 38 (64.4\%) & 28 (46.7\%) & minus 10 \\
+V88-UC-1M & 23 (39.0\%) & 12 (20.0\%) & minus 11 \\
+V87-ST-1M & 28 (47.5\%) & 16 (26.7\%) & minus 12 \\
+V88-ST-1M & 22 (37.3\%) & 10 (16.7\%) & minus 12 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The discord arms explode casual to formal (the V87-Discord-1M jump from 6.8\% to 41.7\% is a $6.1\times$ explosion). The UC/ST arms deflate, consistent with the chat-format pretraining pushing toward formal register. The asymmetry is symmetric: both architectures move in the same direction on the same arms. M2 is a measurement of how much the chat-tuned model's ``OOD'' boundary is just the model's preferred register snapping closed.
+
+The discord casual cells in this table are s42 values. Under the 3-seed extension (\S4.4.1) the s42 1M casual numbers (4/59 vs 5/59) are the favourable corner for V87 (the transformer leads at the 3-seed mean); the $6.1\times$ casual-to-formal explosion quoted above uses the s42 casual value and would shrink at the 3-seed mean (V87-1M casual 3-seed mean 18.1\% $\to$ formal 41.7\% is $2.3\times$). The M2 mechanism (casual vs formal asymmetry) is unaffected --- both architectures still explode casual to formal on discord --- but its magnitude on V87-1M is overstated by the s42 casual baseline.
+
+\subsection{M3: Backbone-Intrinsic Residual}
+
+Two small residual signals are backbone-intrinsic and survive M1 $\times$ M2:
+
+\begin{itemize}
+  \item \textbf{(i) Cross-lingual residual.} On the NONENGLISH subcategory (Korean, Japanese, French, German, Spanish), every UC and ST arm under every probe regime hijacks at 4 to 7 of 10 prompts. Discord references register 0 to 2. The mechanism is register mismatch at its extreme: instruction-tuned corpora are English-purified, so non-English input is maximally off-manifold and the model falls back to its strongest available cue, namely \texttt{User:/Assistant:}, which triggers a memorized answer. The residual is seed-robust at approximately 5 of 10 across the 3-seed re-run.
+  \item \textbf{(ii) Mixer-on-ST conserved total.} Total hijack across the casual/formal cells on V87-ST-1M moves 44 to 46/48/42 (mean 45.3 $\pm$ 3.1, MSD \S2.a/b). The probe anchors redistribute between casual and formal (casual 28 to mean 20.0; formal 16 to mean 25.3), but the total under conservation is preserved. Discord anchors do not reduce the mixer's ST-arm boundary; they shift it.
+\end{itemize}
+
+\subsection{The Fully-Controlled Cell}
+
+Under discord probes (Dprobe) and formal evaluation, all four UC/ST arms at 1M sit at parity with the discord reference within noise:
+
+\textbf{Table 5.5.} Fully-controlled cell (Dprobe $\times$ formal) hijack counts, 3-seed, with discord reference.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 5.5. Fully-controlled cell (Dprobe $\times$ formal).}
+\begin{tabular}{lcc}
+\toprule
+arm & formal Dprobe hijack & discord reference \\
+\midrule
+V87-UC & 23 / 25 / 32 = 26.7 $\pm$ 4.7 & 24.0 $\pm$ 1.0 (25/24/23) \\
+V88-UC & 7 / 9 / 4 = 6.7 $\pm$ 2.5 & 10.0 $\pm$ 1.7 (11/8/11) \\
+V87-ST & 25 / 27 / 24 = 25.3 $\pm$ 1.5 & 24.0 $\pm$ 1.0 \\
+V88-ST & 8 / 11 / 6 = 8.3 $\pm$ 2.5 & 10.0 $\pm$ 1.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is the fully-controlled cell: same probe register (Dprobe, discord), same evaluation register (formal). Both UC/ST arms are statistically indistinguishable from the discord reference on 3-seed means; individual seeds deviate (V87-UC s44 reads 32 vs ref 23), and the s42 single-seed reading was the lucky corner. Under full register control the result is parity, not superiority.
+
+\subsection{OOD as a Register-Pair $\times$ Collapse-Inclusive Property}
+
+The first audit pass (the $2\times 2$ of \S5.1-\S5.5; pre-registered in \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_HIJACK_MECHANISM_ANALYSIS.md}{[OOD\_HIJACK\_MECHANISM\_ANALYSIS.md]}) suggests that OOD boundary in this study is a register-pair property. The second pass (the collapse-rescore in \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md]}; post-hoc, see the explicit disclosure below) further suggests the same boundary is also collapse-inclusive. Probe A (any word-3-gram repeating 5$\times$ or more in the generation implies collapsed and is reclassified as hijack) is applied to the casual OOD battery at 500K, three seeds.
+
+\textbf{Table 5.6.} Collapse-rescore of the casual OOD battery at 500K (3 seeds). Rescored hijack \% reclassifies content loops (word-3-gram $\geq 5\times$) as hijack.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 5.6. Collapse-rescore of the casual OOD battery at 500K (3 seeds).}
+\begin{tabular}{p{3.4cm}>{\centering\arraybackslash}p{3.4cm}>{\centering\arraybackslash}p{3.0cm}>{\centering\arraybackslash}p{3.4cm}}
+\toprule
+arm (500K, casual) & orig hijack\% (mean) & collapses /59 (mean) & rescored hijack\% (mean) \\
+\midrule
+V87-Discord & 35.0 (s42 35.6, s43 32.2, s44 37.3) & 2.3 & 39.0 \\
+V88-Discord & 16.9 (s42 11.9, s43 22.0, s44 16.9) & 25.7 & 58.7 \\
+gap orig to rescored & measured $+18.1$pp for V88 becomes rescored minus 19.7pp (V87 better) & & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 18.1pp measured V88 advantage becomes a 19.7pp V87 advantage after rescoring, a 37.8pp swing; the collapse correction exceeds the measured gap by a factor of about 2.1 (37.8pp swing on an 18.1pp measured gap; see Appendix B.3 for the chance-match caveat).
+
+\textbf{Welch tests on both gaps (3 seeds).} The original legacy 500K gap is itself nominally significant at $n=3$ ($t = 5.52$, $df \approx 2.99$, $p = 0.012$ --- the V88 ``win'' was not noise either), so the inversion cannot be dismissed as rescoring a null; the rescored inversion is strong ($t = 17.41$, $df \approx 3.20$, $p = 0.0003$).
+
+V88-500K loops on 25.7 of 59 (mean) casual OOD prompts. V87-500K almost never loops (2.3 of 59). The 25.7 of 59 = mean of TOTAL collapsed outputs including already-hijack ones (per-seed 27 / 25 / 25, source \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md]} \S1); the newly-flagged subset (Part 1 Appendix B Table B.1, ``coll'' = newly flagged non-hijacks) means 24.7 of 59 (per-seed 27 / 22 / 25) --- the two definitions differ only at s43 (25 vs 22), and the inversion is intact under either definition. The legacy detector counts a content-loop collapse as ``free'' because the loop matches no memorized answer.
+
+Threshold robustness across 3-seed means: rescoring reverses the ordering at every threshold from $\geq 3\times$ through $\geq 8\times$ 3-gram repeats; only at $\geq 10\times$ does the original ordering reappear (and only by 5 counts ($\sim$8.5pp): V87-500K 21/59 = 35.6\% vs V88-500K 16/59 = 27.1\%, a $+5.0$-count gap). Seed robustness: every seed inverts the ordering (39.0 / 37.3 / 40.7 vs 57.6 / 59.3 / 59.3). Echo+collapse overlap exclusion moves V88-500K from 58.7\% to 55.4\% (inversion still intact). The rescoring is conservative against V88: it undercounts loops that vary every third word, the loop-detection window truncates at 400 characters, and excluding echo+collapse pushes V88 lower.
+
+\textbf{Post-hoc detector disclosure.} The 3-gram $\geq 5\times$ collapse rule was designed \emph{after} observing V88-500K's content-loop failures on the casual OOD battery (per \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_\allowbreak COLLAPSE\_\allowbreak RESCORE\_\allowbreak ANALYSIS.md]} \S4-8: the rule was motivated by the parent note's \S6 observation of V88-500K loops, then registered as the decisive cheap probe) --- it is a post-hoc detector motivated by the very failure mode it scores. The threshold and seed robustness above defend its stability, but small-sample human validation of individual rule hits (confirming each flagged generation is genuinely a degenerate content loop rather than a fluent-but-repetitive false positive) is future work; a detector blind to its motivating example could be tightened or loosened, but the 37.8pp swing is stable across thresholds $\geq 3\times$ to $\geq 8\times$.
+
+The collapse-rescore is casual-register-specific. On the formal battery, V87-500K produces zero collapsed outputs in 180 generations; V88 produces approximately 4 per 180. The casual collapse is a property of off-manifold casual prompts on the instruction-tuned model. At 1M on the casual battery, rescored: V87 39.0\% vs V88 57.6\% (3-seed extension); for the registered single-seed 6.8\%/8.5\% near-parity, the s42 reading sits at the favorable corner of a noisy, register-confounded measurement (see Appendix B.2 for the chance-match caveat).
+
+\textbf{General coincidence policy.} Several OOD-hijack and EM values recur across unrelated cells with no shared computation: 39.0 (V87-1M rescored = V87-500K rescored), 6.8 (V87-1M-s42 = V87-50K-s42), 18.1 (\S5.6 pp gap = \S4.4.1 V87-1M 3-seed \%), 16.9 (V88-500K 3-seed mean = V88-10K 3-seed mean, Table 4.4b), 22.0 (V87-1M-s43 = V88-500K-s43), 25.4 (V87-1M-s44 = V87-300K-s42 = 25.4\%), 32.2 (V87-500K-s43 orig hijack \% = V87-1M-s43 rescored hijack \%), 57.6 (V88-1M rescored $\approx$ V88-500K-s42-rescored region), and 741.3 (V88-UC-1M 3-seed mean = V88-ST-1M 3-seed mean; per-seed 749/730/745 vs 744/742/738, identical sum 2224 by chance). All are chance matches of rounded readouts on different (arm $\times$ budget $\times$ seed $\times$ detector) cells, not duplications; where a per-seed decomposition exists it confirms the underlying distributions differ. The policy throughout this paper is to flag such coincidences inline rather than silently let the reader infer a shared quantity.
+
+The lucky-corner reading is now confirmed twice over, by two different corrections on the same casual battery. First, by plain seed noise on the legacy collapse-blind metric itself: the discord casual OOD column was extended to 3 seeds (\S4.4.1), and even before any collapse rescoring the s42 1M near-parity does not replicate (the transformer leads at the 3-seed mean; data in \S4.4.1). Second, by the collapse-rescore above (rescored 39.0\% vs 57.6\%). The two corrections are independent and reach the same direction (the s42 corner flattered V87) for different reasons --- seed noise versus collapse-inclusive detection --- which is the stronger evidence that the registered 6.8\%/8.5\% was a favourable corner, not a stable architecture property.
+
+Mechanism (hypothesis, not isolating-tested): we hypothesize that relative-position (RoPE) attention admits content loops, while V87's non-LTI filter suppresses the orbit; on OOD prompts where the QA-format prior has no key to snap to, V88 would fall into the orbit and the orbit is detector-invisible. This hypothesis is consistent with the observed collapse-rate gap (V88-500K 25.7 of 59 casual OOD prompts loop vs V87-500K 2.3 of 59), but no isolating ablation was run to attribute the gap specifically to RoPE vs the non-LTI filter: a RoPE-off ablation on V88 or an LTI-only-mixer ablation on V87 would be needed to separate the two. The architectural difference in collapse propensity is real at the measurement level (the 2.3 vs 25.7 collapse rates are stable across seeds and thresholds); what is hypothesis-level is its attribution to RoPE-admits-loops vs non-LTI-suppresses-loops. What the registered metric measured was which detector was loaded, not the mechanism by which the architectures differ in loop propensity.
+
+The terminology of ``OOD boundary'' in this project now requires both registers: the probe register (which anchors the model's distribution during FMSP) and the evaluation register (which prompts the model at test time). Any future OOD claim must report the pair, and must report whether the detector collapses a loop or hides one.
+
+\section{Replicated Scaling Patterns}
+
+\emph{Scope note.} We use the word ``law'' in this section strictly for the two regularities that replicate across all six (architecture $\times$ corpus) cells tested in this study (the 500K$\to$300K memorization cliff in \S6.1 and the EM = 0 floor at $\leq 100$K in \S6.2). With two architectures in the panel, ``architecture-independent'' means consistent across these two architectures only; the cliff in \S6.1 is additionally 3-seed-confirmed on the four (arch $\times$ corpus) capability arms (\S6.1), and with the remaining metrics single-seed these are robust trends, not population claims. Elsewhere in the paper we write ``scaling pattern'' or ``regularity'' for the same observations when the cross-corpus basis is not the explicit subject.
+
+\subsection{The 500K to 300K Memorization Cliff}
+
+Full-988 EM at 500K to 300K:
+
+\textbf{Table 6.1.} Full-988 EM at 500K vs 300K (V87 / V88 combined per arm), with the 500K$\to$300K ratio. UC/ST cells are seed-42 point values; discord reference cells are registered Part-1 3-seed means (500K: V87 279 = 279.3 = mean of 270/280/288, V88 397 = 396.7 = mean of 386/403/401; 300K: V87 56 = 56.3, V88 42 = 42.0). The discord ref cells are therefore 3-seed means while the UC/ST cells are s42 point values --- they are not on the same seed basis.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 6.1. The 500K$\to$300K memorization cliff.}
+\begin{tabular}{lccc}
+\toprule
+arm & 500K & 300K & ratio \\
+\midrule
+V87-UC & 423 & 134 & $3.2\times$ \\
+V88-UC & 550 & 211 & $2.6\times$ \\
+V87-ST & 481 & 133 & $3.6\times$ \\
+V88-ST & 580 & 137 & $4.2\times$ \\
+V87-Discord (ref) & 279 & 56 & $5.0\times$ \\
+V88-Discord (ref) & 397 & 42 & $9.4\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Every arm slides off the cliff between 500K and 300K. The data lifted the floor (300K EM on ST and UC is far above 300K EM on discord) without removing the cliff shape ($2.6\times$ to $4.2\times$ on the new corpora vs $5.0\times$ to $9.4\times$ on discord; 396.7/42.0 = 9.445 $\to$ $9.4\times$). The cliff is smaller in magnitude but the same shape across all six (architecture $\times$ corpus) cells.
+
+\textbf{Three-seed confirmation (seeds 42/43/44, \S4.2.1).} The cliff is not a seed-42 artifact. With error bars on the four (architecture $\times$ corpus) arms, every arm loses 61\% to 78\% of its EM between 500K and 300K with non-overlapping 3-seed ranges (the worst 500K arm, V87-UC at 409.3, still nearly doubles the best 300K arm, V88-UC at 213.3; 409.3/213.3 = 1.92):
+
+\textbf{Table 6.2.} Three-seed confirmation of the 500K$\to$300K cliff on the four (arch $\times$ corpus) capability arms.
+
+\begin{table}[!t]
+\centering
+\small
+\caption*{Table 6.2. Three-seed confirmation of the 500K$\to$300K cliff.}
+\begin{tabular}{l>{\centering\arraybackslash}p{3.4cm}>{\centering\arraybackslash}p{2.6cm}>{\centering\arraybackslash}p{2.4cm}>{\centering\arraybackslash}p{3.0cm}}
+\toprule
+arm      & 500K mean & 300K mean & drop   & relative \\
+\midrule
+V87-UC   &     409.3 &     126.3 &  283.0 &    $-69$ \% \\
+V87-ST   &     477.3 &     135.3 &  342.0 &    $-72$ \% \\
+V88-UC   &     552.0 &     213.3 &  338.7 &    $-61$ \% \\
+V88-ST   &     574.0 &     126.7 &  447.3 &    $-78$ \% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On the discord reference, the architecture gap at both ends of the cliff is bootstrap-supported at s42 (window-level binomial, \S4.6): discord-1M V88 - V87 = $+99$ EM, 95\% CI [$+63$, $+136$] (transformer ahead, robust); discord-300K V88 - V87 = $-20$ EM, 95\% CI [$-38$, $-2$] (mixer ahead, robust; the upper bound ($-2$) sits just below zero, so the CI excludes 0). So the discord cliff runs from a clear V88 advantage at 1M to a clear V87 advantage at 300K - the inversion is real - while on UC the transformer leads at both ends (cliff is purely budget-driven), and on ST the architecture term is inside noise at both ends.
+
+The mechanism: at 300K the model sits just under the $p \approx 0.99$ compounding ledge where repeated exposure to a 10K-template FMSP corpus drives the next-byte prediction of each answer region toward one; at 500K the exposure is enough to lock the prediction; at 300K it is not, and a one-position error compounds through long answers. The exact exponent varies by corpus (cleaner chat corpora compound more reliably per-byte) but the cliff is shared.
+
+\subsection{The EM = 0 Floor at $\leq 100$K}
+
+On every (architecture $\times$ corpus) cell where the FMSP end-of-epoch cross-entropy exceeds approximately 0.77 (which is every arm at $\leq 100$K), both full-988 EM and internal-200 EM are exactly 0. Both architectures, on both fine-tuned corpora (UC and ST), and on the registered discord arm. The 0.77 train-CE floor is the headroom ceiling: below it, the model has learned the corpus's general register without learning enough of any answer region to lock.
+
+\subsection{The Capacity Ordering Regularity}
+
+The capacity ordering (fluency first, memorization second, boundary discipline third) holds across architectures and across corpora:
+
+\begin{itemize}
+  \item \textbf{Fluency} (chatter d2 over 0.50) is reachable at $\leq 300$K on every corpus: e.g., V88-Discord-300K d2 0.840, V87-UC-300K 0.868.
+  \item \textbf{Memorization} (full-988 EM > 0) requires $\geq 300$K on every corpus tested.
+  \item \textbf{Boundary discipline} (qrel echo and hijack on the near-distribution battery): the transformer holds near-distribution boundary discipline from $\sim$500K (qrel hijack 16\% vs the mixer's 49\% at 500K); the mixer reaches it at 1M.
+\end{itemize}
+
+The last item is the one the dataset sweep most affects: the transformer's casual-battery OOD hijack at 500K reads 11.9\% on discord (V88-Discord-500K), 59.3\% (35/59) on UC, and 42.4\% (25/59) on ST, so the registered 1M OOD comparison does not transfer to the new corpora at 500K.
+
+\section{Limitations}
+
+Every claim in Sections 4 to 6 is conditioned on the following limitations. The measurement-caveat items consolidate caveats originally documented in the four analysis notes (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DATASET_COMPARISON_ANALYSIS.md}{[DATASET\_\allowbreak COMPARISON\_\allowbreak ANALYSIS.md]}, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_HIJACK_MECHANISM_ANALYSIS.md}{[OOD\_\allowbreak HIJACK\_\allowbreak MECHANISM\_\allowbreak ANALYSIS.md]} = MECH, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DPROBE_MULTISEED_ANALYSIS.md}{[DPROBE\_\allowbreak MULTISEED\_\allowbreak ANALYSIS.md]} = MSD, \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_\allowbreak COLLAPSE\_\allowbreak RESCORE\_\allowbreak ANALYSIS.md]} = CRS; abbreviations defined once here, see \S3.8 for the full filenames) and rephrased here in paper voice.
+
+\begin{enumerate}
+  \item \textbf{Partial seed coverage.} Seed coverage is split: EM is 3-seed on the UC/ST capability arms (1M/500K/300K, \S4.2.1) and on the discord reference via the registered Part-1 baseline ($\pm 10$ EM); discord qrel/OOD/fabrication/langpreserve are 3-seed (\S4.4.1); chatter everywhere and the UC/ST non-EM metrics remain single-seed (s42) trends. The full seed-coverage policy is in \S3.7 (canonical). The partial multi-seed extension does not turn the panel into a population claim, since pretraining, chatter, and the UC/ST non-EM metrics remain s42. Backbone-level (pretrain-seed) coverage is new in this revision and covers exactly one cell: discord-1M at three pretrain seeds (\S3.7, backbone multi-seed paragraph); every other cell in the series, including the entire UC/ST/TS sweep panel, remains backbone $n = 1$.
+
+  \item \textbf{UltraChat is 146K, not 200K.} The \href{https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k}{\texttt{HuggingFaceH4/ultrachat\_200k}} \texttt{train\_sft} split caps at approximately 146K samples; the sweep cap reflects this directly. The capability gains over discord remain $+13\%$ to $+29\%$ at 1M on the UC/ST arms at 3 seeds ($+15\%$ to $+23\%$ on UC alone at s42; \S4.5), so the ``smaller corpus beats larger corpus'' pattern is not an artifact of data quantity. It does, however, mean that the UC arm absorbs 27\% less data than the ST/TS arms in cross-corpus comparisons.
+
+  \item \textbf{Discord-register eval batteries carry a register confound (chatter and OOD).} Both the chatter battery and the OOD battery were authored to match the discord pretraining register. Cross-corpus comparisons on these metrics thus confound corpus content with register; the ST chatter story (both architectures WIN on ST, both FAIL on UC) is robust to this confound (the same architecture on two pretraining corpora flips the WIN bar), but smaller-margin within-corpus comparisons are not. The confound carries into the \S4.7 chatter reading: the d2 numbers are joint measurements of anti-collapse on discord-register prompts by a model trained on a corpus with its own register; the ST win is robust, the smaller-margin within-corpus readouts are not.
+
+  \item \textbf{\texttt{discord\_PPL} is a forgetting-with-no-baseline axis.} The langpreserve \texttt{discord\_PPL} for the UC and ST arms is expectedly high because the no-baseline axis cannot distinguish forgetting from register-shift. The qa1k\_TF\_PPL and distinct2 columns are the informative cells. The discord\_PPL column is reported for completeness only.
+
+  \item \textbf{FMSP OOMs on first attempt (GPU-index divergence root cause).} \texttt{fmsp-V87-ST-1M.log} and \texttt{fmsp-V87-UC-500K.log} initially OOMed on worker 0's 4070. Retried on the 16GB 5060 Ti; succeeded. The torch-vs-nvidia-smi GPU index divergence left only worker 5 reliably holding 1M-with-in-distribution-probe FMSP on the new arms. The same GPU-index divergence also OOMed lane 0's first 1M Dprobe run (one partial checkpoint was discarded and retrained; see item 9 below).
+
+  \item \textbf{This is an analysis note, not a versioned experiment.} The registered discord-arm numbers are unchanged in this paper. The sweep is not re-registration; it is a controlled extension. There is no V89.
+
+  \item \textbf{Cross-dataset PPL is not directly comparable.} Different corpora have different val distributions. Within-dataset ranking is the only honest PPL claim.
+
+  \item \textbf{The OOD mechanisms M1 and M2 are separated in Section 5 but were not separated by the dataset-sweep data alone.} The $2\times 2$ design and the 3-seed re-run are what separate them; without those, the registered single-axis metric conflates them.
+
+  \item \textbf{The V88-UC-50K fabrication caveat.} The 3/18 value is an evasive-template collapse, not a fabrication improvement. Corpus-invariance of fabrication holds on every other cell.
+
+  \item \textbf{Measurement caveats for the OOD/Dprobe/collapse-rescore machinery (MECH \S3; MSD \S6; CRS \S4).} The four analysis-note caveat sets are consolidated here: (a) OOD battery: s42 on the casual battery; eval sets not difficulty-matched across casual/formal (decomposition relies on the interaction); \texttt{regmatch} formal set has no NONENGLISH/CODE analogue (M3 cross-lingual residual is casual-only); 500K grid sits in the cliff-regime noise band. (b) Dprobe multi-seed: own-probe cells remain s42-only (3-seed Dprobe mean paired against 1-seed own-probe number); pretraining is shared across FMSP seeds (backbone-level seed noise out of scope); $n = 59/60$ means sds are descriptive, not inferential; some samples-file naming collisions clobbered the s42 500K Dprobe generations (only headline numbers survive); the \S5 collapse-rescore of Dprobe arms is descriptive. (c) Collapse-rescore: the 3-gram $\geq 5\times$ rule undercounts loops that vary every third word; generation truncated at 400 chars (bias small and against V88, making the inversion conservative); echo+collapse rescored as hijack (excluding it moves V88-500K from 58.7\% to 55.4\%, inversion intact); cross-battery marginals not difficulty-matched; 1M seed extension is a new measurement, not a re-registration of the 1M OOD bar. (d) Fisher-corpus ablation not run (Fisher profile co-varies with corpus; see \S3.4 for the design caveat).
+
+  \item \textbf{Generation-based metrics use raw-greedy decoding (decode knobs inert under T = 0).} See \S3.6 metric 4 for the full documentation: the configuration sets repetition-penalty 1.2 and no-repeat-4-gram but they fire only in the sampling branch; raw-greedy verification on 24 chatter-tested pretrained backbones --- all 12 discord backbones plus the 12 UC/ST capability-size backbones (1M/500K/300K only); TinyStories and UC/ST $\leq 100$K were not raw-greedy checked --- produced byte-identical outputs to the registered runs. Distinct-2 is a diversity measure, not a fluency measure (defined in \S3.6).
+
+  \item \textbf{Capability coverage remains internal; one external perplexity anchor added (\S4.12).} All capability numbers in this paper (full-988 EM, internal-200 EM) derive from the project-internal \href{https://huggingface.co/datasets/llaa33219/small-qa-en-10k}{\texttt{llaa33219/small-qa-en-10k}} held-out set (\S3.2); no external QA/classification benchmark (e.g., a subset of MMLU/HellaSwag/Lambada) was run, so the ``capability'' axis remains a memorization/generalization readout on one internal QA distribution, and cross-study ranking against other small-LM reports should not be inferred from these EM numbers alone. The perplexity axis now carries one external anchor: \S4.12 reports byte-PPL/BPB on the official TinyStories validation split [Eldan and Li, 2023] for all twelve TS arms, with GPT-2-small [Radford et al., 2019] as a BPB reference, giving the panel one externally-comparable measurement aligned with the standard literature. Part 1 now adds the complementary WikiText-103 byte-PPL anchor on the discord backbones (\S8.13 there); extending the anchors to an external capability benchmark remains future work.
+
+  \item \textbf{The ``quality'' ranking is post-hoc on the EM axis but independently corroborated on the PPL/cleanliness axis (circularity caveat).} ``Quality'' (the discord $<$ UC $<$ ST ranking used in \S3.2/\S4.5/\S4.6) was originally defined post-hoc by the EM lift outcome, so the ``chat-format curation is first-order'' claim was partially circular. An independent GPT-2-small neutral-scorer PPL audit (\S3.2 proxy table; \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/CORPUS_QUALITY_PROXY_ANALYSIS.md}{[CORPUS\_QUALITY\_PROXY\_ANALYSIS.md]}) reproduces the full ordering --- discord (184.4) $\gg$ UC (12.7) $>$ ST (10.6) --- matching the EM-lift order, so the circularity is bounded on the cleanliness/standardness axis. ``Quality'' in this paper therefore means curation toward a clean, low-PPL instruct register, not lexical variety: lexical/structural diversity proxies invert the order (discord most diverse; \S3.2), and that inversion survives an equal-token control. The first-order claim should be read as ``chat-format curation toward a clean, low-PPL instruct register lifts held-out QA EM at the 1M budget on these three corpora'', not as an independent ranking of corpus quality driving capability.
+
+  \item \textbf{The collapse-rescore inversion is detector-conditional.} The 500K OOD-ordering inversion (\S5.6) holds at every threshold $\geq 3\times$--$\geq 8\times$ and on all three seeds, but the original ordering reappears at $\geq 10\times$ (by 5 counts), so the conclusion is detector-conditional: under a collapse-inclusive detector (word-3-gram $\geq 5\times$ rule), the 500K ordering inverts at every threshold $\geq 3\times$--$\geq 8\times$ and on all three seeds, but a stricter detector ($\geq 10\times$) restores the original V88 advantage. The \S8 conclusion is conditional on the collapse-inclusive detector.
+\end{enumerate}
+
+\section{Conclusion}
+
+Under this equal-cap design (the equal requested 200K row cap, identical byte pipeline, identical optimizer-step recipe, and the per-token efficiency inversion that bounds the volume confound; see \S3.2), changing the pretraining corpus dominates the architecture term in held-out QA EM at 1M, conditional on the residual volume confound that the compared corpora still differ $14\times$ to $23\times$ in words-per-epoch and the design cannot fully separate corpus content from corpus volume. The first-order term in the capability lift is the corpus; the per-token inversion (UC/ST spend $10\times$ to $20\times$ more words per EM point than discord) bounds the volume confound. The architecture findings describe this two-architecture panel only, and extending the controlled corpus comparison to other non-attention backbones (state-space models such as Mamba [Gu and Dao, 2023], gated long convolutions such as Hyena [Poli et al., 2023]) is future work. With V87 (CCD-Mixer) and V88 (vanilla transformer) trained under bit-identical recipes at six budgets from 10K to 1M, changing the pretraining corpus (and, necessarily, its corpus-linked FMSP probe anchors; \S3.4) lifts full-988 EM by $+13\%$ to $+29\%$ at 1M (3-seed/3-seed basis) and $2.4\times$ to $5.0\times$ at 300K, and leaves the architecture gap on the most heavily curated corpus statistically undetectable at three seeds rather than erased (SmolTalk2 at 1M, 3 seeds: V87 mean 729.0 (sample sd 8.9) vs V88 mean 741.3 (sample sd 3.1), $+12.3$ EM, Welch $t = 2.27$, $df = 2.47$, $p = 0.13$; permutation $p = 0.20$ --- not significant; on UltraChat the 1M gap is the largest point gap, $+46.0$ EM, $t = 7.75$, $p = 0.012$ (not significant after the Bonferroni correction we cite ($\alpha=0.0083$); directionally consistent with the mid-budget UC pattern; at $n=3$ the permutation test cannot confirm this (floor $p\geq 0.10$), so UC-1M significance rests on the parametric Welch test alone); seed 42 was V87's favourable draw at ST-1M, 739 $\to$ 722/726 on the new seeds). The residual architecture term at the top budget is not statistically detectable at three seeds on the friendliest corpus. The dominance claim is scoped to capability/memorization at the 1M budget: at $\leq 500$K budgets the architecture term is robust and large (UC-500K $+142.7$, ST-500K $+96.7$, UC-300K $+87.0$; all $p < 0.01$), and the collapse-propensity difference (V88-500K loops on $\sim$44\% of casual OOD prompts vs V87's $\sim$4\%) is an anti-collapse architecture effect independent of capability. The mixer's anti-collapse chatter moat, the headline finding of the registered study, is register-dependent, not universal: it inverts on UltraChat (both architectures fail to clear the WIN bar) and is replicated by the transformer on SmolTalk2 (d2 = 0.911 at 1M, 0.932 at 500K). The $4\times$ to $10\times$ OOD-hijack explosion on the new corpora ($7\times$ to $10\times$ for the mixer, $4\times$ to $5\times$ for the transformer) factors into a probe-register mismatch (M1, $\sim$$2\times$ to $3\times$) and an evaluation-register mismatch (M2, $\sim$$2\times$ to $3\times$) with only a small backbone residual; the registered 500K V88 OOD ``win'' was a collapse-detection artifact: under a collapse-inclusive detector, the 500K ordering inverts at every threshold $\geq 3\times$--$\geq 8\times$ and on all three seeds (the original ordering reappears only at $\geq 10\times$, by 5 counts), and the correction exceeds the measured gap by a factor of about 2.1 (a 37.8pp swing on an 18.1pp measured gap; V88-500K loops on $\sim$44\% of casual OOD prompts and a periodic loop is invisible to a memorization-matching detector), so the rescored ordering inverts to V87 39.0\% vs V88 58.7\%. The registered s42 1M OOD near-parity (6.8\% vs 8.5\%) is now confirmed as a lucky corner by two independent corrections on the same casual battery: plain seed noise on the legacy collapse-blind metric (V87-1M 18.1\% vs V88-1M 8.5\% at 3-seed mean; \S4.4.1) and the collapse-rescore (39.0\% vs 57.6\%; \S5.6) both show the s42 corner flattered V87. Discord-register probe anchors restore boundary discipline on the transformer arms at no statistically detectable memorization cost at $n=3$ (a mean cost of $-2$ to $-20$ EM cannot be excluded); the mixer's boundary is register-locked (anchors redistribute, never reduce its hijack total), an architecture split in steerability that probe KL exposes. The 500K to 300K memorization cliff and the EM = 0 floor at $\leq 100$K (train-CE $\gtrsim 0.77$) replicate across six (architecture $\times$ corpus) cells, generalizing the regularities beyond architecture to corpus as well, within the scope caveat in \S6. Future sub-1M comparison studies at this scale must report the corpus, the probe register, the eval register, and the collapse detector, or they will measure the pipeline and not the model.
+
+\section*{Code, Data, and Model Availability}
+
+Source code, the full design-note archive, the four analysis notes, and the sweep orchestration scripts are available under Apache-2.0 at \url{https://github.com/llaa33219/MicroMixer-4}. Every sweep checkpoint is published as a safetensors-only Hugging Face repository under the naming scheme in \S3.8, with all V87 models grouped at \url{https://huggingface.co/collections/llaa33219/micromixer-4} and all V88 models grouped at \url{https://huggingface.co/collections/llaa33219/microt-test1}. The FMSP dataset, \texttt{llaa33219/small-qa-en-10k} (9,012 train / 988 held-out paraphrases, group-aware split), is available at \url{https://huggingface.co/datasets/llaa33219/small-qa-en-10k}.
+
+\section*{References}
+
+\par\hangindent=1.5em Carlini, N., et al. (2022). ``Quantifying Memorization Across Neural Language Models.'' arXiv preprint (revised 2023). arXiv:2202.07646.
+
+\par\hangindent=1.5em Lee, S. (2026a). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md}.'' Companion analysis note (collapse-aware rescoring of the casual OOD battery). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em Lee, S. (2026b). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/CONTAMINATION_ANALYSIS.md}{CONTAMINATION\_ANALYSIS.md}.'' Companion analysis note (word-level 8-gram/13-gram contamination audit of the three pretraining corpora against the 988 held-out QA answers and questions). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em Lee, S. (2026c). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/CORPUS_QUALITY_PROXY_ANALYSIS.md}{CORPUS\_QUALITY\_PROXY\_ANALYSIS.md}.'' Companion analysis note (GPT-2-small neutral-scorer PPL, turn count, dedup rate, and lexical/structural diversity proxies for the three chat-format corpora). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em Li, J., et al. (2024). ``DataComp-LM: In Search of the Next Generation of Training Sets for Language Models.'' \emph{Proceedings of the 38th Conference on Neural Information Processing Systems Datasets and Benchmarks Track (NeurIPS)}. arXiv:2406.11794.
+
+\par\hangindent=1.5em Lee, S. (2026d). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DATASET_COMPARISON_ANALYSIS.md}{DATASET\_COMPARISON\_ANALYSIS.md}.'' Companion analysis note (the controlled-corpus sweep: UltraChat / SmolTalk2 / TinyStories $\times$ 6 sizes $\times$ 2 archs). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em mookiezi (2024). ``Discord-Dialogues.'' Hugging Face dataset. No associated paper. The reference corpus of the registered study.
+
+\par\hangindent=1.5em Xie, S. M., et al. (2023). ``DoReMi: Optimizing Data Mixtures Speeds Up Language Model Pretraining.'' \emph{Proceedings of the 37th Conference on Neural Information Processing Systems (NeurIPS)}. arXiv:2305.10429.
+
+\par\hangindent=1.5em Penedo, G., et al. (2024). ``The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale.'' arXiv preprint. arXiv:2406.17557.
+
+\par\hangindent=1.5em Lee-Thorp, J., et al. (2022). ``FNet: Mixing Tokens with Fourier Transforms.'' \emph{Proceedings of the 2022 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies (NAACL-HLT)}, pp. 4296 to 4313. arXiv:2105.03824.
+
+\par\hangindent=1.5em Liu, H., Dai, Z., So, D. R., and Le, Q. V. (2021). ``Pay Attention to MLPs.'' \emph{Advances in Neural Information Processing Systems 34 (NeurIPS 2021)}. arXiv:2105.08050.
+
+\par\hangindent=1.5em Radford, A., et al. (2019). ``Language Models are Unsupervised Multitask Learners.'' OpenAI technical report. (GPT-2-small, 124M parameters; used in this paper as a neutral reference scorer: the \S3.2 quality-proxy audit and the \S4.12 external anchor.)
+
+\par\hangindent=1.5em Fu, D. Y., et al. (2023). ``Hungry Hungry Hippos: Towards Language Modeling with State Space Models.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:2212.14052.
+
+\par\hangindent=1.5em Poli, M., et al. (2023). ``Hyena Hierarchy: Towards Larger Convolutional Language Models.'' \emph{Proceedings of the 40th International Conference on Machine Learning (ICML)}. arXiv:2302.10866.
+
+\par\hangindent=1.5em Allen-Zhu, Z., and Li, Y. (2024). ``Physics of Language Models: Part 3.3, Knowledge Capacity Scaling Laws.'' arXiv preprint. arXiv:2404.05405.
+
+\par\hangindent=1.5em [Lee, Part 1 of this series, companion paper] Lee, S. What Capacity Buys at Sub-1M: A CCD-Mixer Study of Attention-Free Language Models. Companion paper, Part 1 of this series.
+
+\par\hangindent=1.5em [Lee, Part 2 of this series, companion paper] Lee, S. The Objective Is the Lever: FMSP and the Composite-Objective Account of Fine-tuning Sub-1M Language Models. Companion paper, Part 2 of this series.
+
+\par\hangindent=1.5em Gu, A., and Dao, T. (2023). ``Mamba: Linear-Time Sequence Modeling with Selective State Spaces.'' arXiv preprint. arXiv:2312.00752.
+
+\par\hangindent=1.5em Lee, S. (2026e). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_HIJACK_MECHANISM_ANALYSIS.md}{OOD\_HIJACK\_MECHANISM\_ANALYSIS.md}.'' Companion analysis note (the $2\times 2$ mechanism decomposition of OOD hijack into probe-register $\times$ eval-register terms). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em Tolstikhin, I., et al. (2021). ``MLP-Mixer: An all-MLP Architecture for Vision.'' \emph{Advances in Neural Information Processing Systems 34 (NeurIPS 2021)}. arXiv:2105.01601.
+
+\par\hangindent=1.5em Lee, S. (2026f). ``\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/DPROBE_MULTISEED_ANALYSIS.md}{DPROBE\_MULTISEED\_ANALYSIS.md}.'' Companion analysis note (3-seed re-run of the Dprobe arms and the fully-controlled cell). Public at \url{https://github.com/llaa33219/MicroMixer-4}.
+
+\par\hangindent=1.5em Groeneveld, D., et al. (2024). ``OLMo: Accelerating the Science of Language Models.'' \emph{Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Long Papers)}, ACL 2024, pp. 15789 to 15809. arXiv:2402.00838.
+
+\par\hangindent=1.5em Biderman, S., et al. (2023). ``Pythia: A Suite for Analyzing Large Language Models Across Training and Scaling.'' \emph{Proceedings of the 40th International Conference on Machine Learning (ICML)}, pp. 2397 to 2430. arXiv:2304.01373.
+
+\par\hangindent=1.5em Su, J., et al. (2024). ``RoFormer: Enhanced Transformer with Rotary Position Embedding.'' \emph{Neurocomputing}, vol. 568, article 127063. arXiv:2104.09864.
+
+\par\hangindent=1.5em Gu, A., Goel, K., and R\'e, C. (2022). ``Efficiently Modeling Long Sequences with Structured State Spaces.'' \emph{International Conference on Learning Representations (ICLR)}. arXiv:2111.00396.
+
+\par\hangindent=1.5em Ben Allal, L., et al. (2025). ``SmolLM2: When Smol Goes Big, Data-Centric Training of a Small Language Model.'' arXiv preprint. arXiv:2502.02737. (Formal citation for SmolTalk; there is no standalone ``SmolTalk'' paper.)
+
+\par\hangindent=1.5em Hugging Face (2025). Dataset card, \texttt{HuggingFaceTB/smoltalk2}. With: Bakouch, E., et al. (2025). ``SmolLM3: smol, multilingual, long-context reasoner.'' Hugging Face technical blog (no arXiv ID).
+
+\par\hangindent=1.5em Tay, Y., et al. (2021). ``Synthesizer: Rethinking Self-Attention for Transformer Models.'' \emph{Proceedings of the 38th International Conference on Machine Learning (ICML)}, pp. 10183 to 10192. arXiv:2005.00743.
+
+\par\hangindent=1.5em Gunasekar, S., et al. (2023). ``Textbooks Are All You Need.'' arXiv preprint. arXiv:2306.11644.
+
+\par\hangindent=1.5em Eldan, R., and Li, Y. (2023). ``TinyStories: How Small Can Language Models Be and Still Speak Coherent English?'' arXiv preprint. arXiv:2305.07759.
+
+\par\hangindent=1.5em Ding, N., et al. (2023). ``Enhancing Chat Language Models by Scaling High-quality Instructional Conversations.'' arXiv preprint. arXiv:2305.14233. (HuggingFaceH4/ultrachat\_200k is a derivative; the dataset card instructs citing the parent paper.)
+
+\appendix
+\section{Coincidence notes}
+
+The main text flagged several OOD-hijack and EM values that recur across unrelated cells with no shared computation. The full chance-match documentation is consolidated here. The summarizing policy statement remains in \S5.6 (``General coincidence policy'').
+
+\textbf{B.1.} V87-50K-s42 and V87-1M-s42 casual OOD hijack both happen to read 4/59 = 6.8\%; this is a chance match, not a copy. The 3-seed means diverge sharply (V87-50K mean 52.0\% vs V87-1M mean 18.1\%), so the identical s42 reading is the favorable shared corner of two very different seed distributions. The 50K value swings hugely across seeds (s42 6.8 $\to$ s43 66.1 / s44 83.1), confirming it is a genuine s42 reading on a noisy arm, not a duplication of the 1M value.
+
+\textbf{B.2.} V87-1M and V87-500K rescored casual-OOD means both round to 39.0\%, but this is a chance match, not a copy: the underlying per-seed values differ. V87-500K rescored triplet = 39.0 / 37.3 / 40.7 per \href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md]} \S1; V87-1M rescored per-seed triplet = 35.6 / 32.2 / 49.2 (mean 39.0) per the CRS erratum (\href{https://github.com/llaa33219/MicroMixer-4/blob/4bb630413dfa58ef3141291e121ab8c006d03235/OOD_COLLAPSE_RESCORE_ANALYSIS.md}{[OOD\_COLLAPSE\_RESCORE\_ANALYSIS.md]} \S``Erratum and per-seed verification'', lines 275-277; cross-referenced in Part 1 Appendix B and Part 2 \S6.5). Both are independently computed from the same collapse-rescore rule on the same battery at different budgets; the identical means are an artefact of rounding two different seed distributions.
+
+\textbf{B.3.} The ``18.1pp'' measured gap here (\S5.6, percentage-point swing on the 500K V88 hijack advantage) and the ``18.1\%'' V87-1M casual-OOD 3-seed mean (\S4.4.1, Table 4.4a) are the same numeral by coincidence: the gap is in percentage-point units on the V88 500K advantage, the rate is a 3-seed-mean hijack percentage on V87-1M. They are different arms, different budgets, and different units (pp vs \%); the matching first-three-significant-figures is chance, not a shared quantity.
+
+(End of paper)
+
+\end{document}
+
